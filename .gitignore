@@ -1,4 +1,6 @@
 # Files to be kept under a git clean -f
 .code-workspace.code-workspace
-.gitignore
 .vscode
+
+build/
+config/default.cmake
