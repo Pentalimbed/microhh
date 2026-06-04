@@ -40,6 +40,7 @@ class Input
         // void print_itemlist();
         void print_unused_items();
         void flag_as_used(const std::string&, const std::string&, const std::string&);
+        void set_item(const std::string&, const std::string&, const std::string&, const std::string&);
 
         typedef std::map<std::string, std::map< std::string, std::map<std::string, std::pair<std::string, bool>>>> Itemlist;
 

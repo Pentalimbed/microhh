@@ -183,3 +183,8 @@ endif()
 
 add_subdirectory(src)
 add_subdirectory(main)
+
+option(BUILD_VIZ "Build the MicroHH GLFW/ImGui/VTK visualizer" OFF)
+if(BUILD_VIZ)
+  add_subdirectory(viz)
+endif()

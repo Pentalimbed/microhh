@@ -28,6 +28,7 @@
 #include <map>
 #include <iostream>
 #include <iomanip>
+#include <utility>
 #include <boost/algorithm/string.hpp>
 #include "input.h"
 #include "input_tools.h"
@@ -200,6 +201,14 @@ void Input::flag_as_used(const std::string& blockname,
             }
         }
     }
+}
+
+void Input::set_item(const std::string& blockname,
+                     const std::string& itemname,
+                     const std::string& subitemname,
+                     const std::string& value)
+{
+    itemlist[blockname][itemname][subitemname] = std::make_pair(value, true);
 }
 
 void Input::print_unused_items()
