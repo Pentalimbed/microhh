@@ -81,7 +81,7 @@ set(MICROHH_VIZ_LIBS
   OpenGL::GL)
 
 if(USECUDA)
-    target_link_libraries(microhh_viz PRIVATE microhhc curand rte_rrtmgp rte_rrtmgp_cuda rte_rrtmgp_cuda_rt rte_rrtmgp_kernels rte_rrtmgp_kernels_cuda rte_rrtmgp_kernels_cuda_rt ${LIBS} ${MICROHH_VIZ_LIBS})
+    target_link_libraries(microhh_viz PRIVATE microhhc CUDA::curand CUDA::cufft rte_rrtmgp rte_rrtmgp_cuda rte_rrtmgp_cuda_rt rte_rrtmgp_kernels rte_rrtmgp_kernels_cuda rte_rrtmgp_kernels_cuda_rt ${LIBS} ${MICROHH_VIZ_LIBS})
 else()
     target_link_libraries(microhh_viz PRIVATE microhhc rte_rrtmgp_kernels rte_rrtmgp ${LIBS} ${MICROHH_VIZ_LIBS})
 endif()

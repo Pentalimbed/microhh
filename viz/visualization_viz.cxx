@@ -153,6 +153,8 @@ namespace
 
         Camera_drag orbit;
         Camera_drag pan;
+
+        bool vtk_gl_initialized = false;
     };
 
     void vtk_make_current(vtkObject*, unsigned long, void* client_data, void*)
@@ -185,8 +187,25 @@ namespace
         glFlush();
     }
 
+    void ensure_vtk_opengl_state(Viz_state& state)
+    {
+        glfwMakeContextCurrent(state.window);
+
+        if (!state.vtk_gl_initialized)
+        {
+            state.render_window->OpenGLInit();
+            state.render_window->OpenGLInitState();
+            state.vtk_gl_initialized = true;
+        }
+
+        if (!state.render_window->GetState())
+            throw std::runtime_error("VTK OpenGL state is not initialized");
+    }
+
     void bind_glfw_framebuffer(Viz_state& state, int width, int height)
     {
+        ensure_vtk_opengl_state(state);
+
         auto* gl_state = state.render_window->GetState();
         gl_state->Reset();
         gl_state->vtkglBindFramebuffer(GL_FRAMEBUFFER, 0);
