@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,23 +38,34 @@
 #include <vtkArrowSource.h>
 #include <vtkCamera.h>
 #include <vtkCallbackCommand.h>
+#include <vtkColorTransferFunction.h>
 #include <vtkCommand.h>
 #include <vtkDataSetMapper.h>
 #include <vtkFloatArray.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkGlyph3DMapper.h>
+#include <vtkImageData.h>
 #include <vtkLookupTable.h>
-#include <vtkMaskPoints.h>
 #include <vtkNew.h>
+#include <vtkOpenGLFramebufferObject.h>
+#include <vtkOpenGLState.h>
 #include <vtkOutlineFilter.h>
+#include <vtkPiecewiseFunction.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
+#include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkRenderer.h>
+#include <vtkRungeKutta4.h>
 #include <vtkSmartPointer.h>
+#include <vtkSmartVolumeMapper.h>
+#include <vtkStreamTracer.h>
 #include <vtkStructuredGrid.h>
 #include <vtkStructuredGridGeometryFilter.h>
+#include <vtkTextureObject.h>
+#include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
 
 #include "model_viz.h"
 #include "visualization_viz.h"
@@ -61,6 +73,14 @@
 namespace
 {
     enum class Slice_axis { X = 0, Y = 1, Z = 2 };
+
+    enum class Visualization_method
+    {
+        Scalar_slice = 0,
+        Scalar_volume = 1,
+        Velocity_glyphs = 2,
+        Velocity_streamlines = 3
+    };
 
     struct Camera_drag
     {
@@ -83,9 +103,20 @@ namespace
         vtkSmartPointer<vtkPolyDataMapper> outline_mapper;
         vtkSmartPointer<vtkActor> outline_actor;
         vtkSmartPointer<vtkArrowSource> arrow;
-        vtkSmartPointer<vtkMaskPoints> vector_mask;
+        vtkSmartPointer<vtkPolyData> vector_data;
         vtkSmartPointer<vtkGlyph3DMapper> vector_mapper;
         vtkSmartPointer<vtkActor> vector_actor;
+        vtkSmartPointer<vtkPolyData> streamline_seed_data;
+        vtkSmartPointer<vtkRungeKutta4> stream_integrator;
+        vtkSmartPointer<vtkStreamTracer> stream_tracer;
+        vtkSmartPointer<vtkPolyDataMapper> stream_mapper;
+        vtkSmartPointer<vtkActor> stream_actor;
+        vtkSmartPointer<vtkImageData> scalar_image;
+        vtkSmartPointer<vtkSmartVolumeMapper> volume_mapper;
+        vtkSmartPointer<vtkVolume> volume_actor;
+        vtkSmartPointer<vtkVolumeProperty> volume_property;
+        vtkSmartPointer<vtkColorTransferFunction> volume_color;
+        vtkSmartPointer<vtkPiecewiseFunction> volume_opacity;
         vtkSmartPointer<vtkLookupTable> scalar_lut;
         vtkSmartPointer<vtkLookupTable> vector_lut;
         vtkSmartPointer<vtkCallbackCommand> make_current_callback;
@@ -95,18 +126,20 @@ namespace
         vtkSmartPointer<vtkCallbackCommand> frame_callback;
 
         std::vector<std::string> scalar_names;
+        int method = static_cast<int>(Visualization_method::Scalar_slice);
         int scalar_index = 0;
         int stride = 1;
-        int vector_on_ratio = 12;
+        int vector_stride = 8;
+        int streamline_stride = 10;
         int slice_axis = static_cast<int>(Slice_axis::Z);
         int slice_index = 0;
-        bool show_velocity = true;
         bool running = false;
         bool step_requested = false;
         bool restart_requested = false;
         bool needs_dataset_update = true;
         bool reset_camera = true;
-        float glyph_scale = 1.f;
+        float glyph_scale = 5.f;
+        float volume_opacity_scale = 1.f;
 
         std::array<int, 3> dims = {{1, 1, 1}};
         float scalar_min = 0.f;
@@ -115,6 +148,7 @@ namespace
         float vector_max = 0.f;
         double time = 0.;
         double dt = 0.;
+        double max_extent = 1.;
         int iteration = 0;
 
         Camera_drag orbit;
@@ -149,6 +183,32 @@ namespace
     void vtk_frame(vtkObject*, unsigned long, void*, void*)
     {
         glFlush();
+    }
+
+    void bind_glfw_framebuffer(Viz_state& state, int width, int height)
+    {
+        auto* gl_state = state.render_window->GetState();
+        gl_state->Reset();
+        gl_state->vtkglBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl_state->vtkglViewport(0, 0, width, height);
+    }
+
+    void draw_vtk_background(Viz_state& state, int width, int height)
+    {
+        auto* display_framebuffer = state.render_window->GetDisplayFramebuffer();
+        if (!display_framebuffer)
+            return;
+
+        auto* texture = display_framebuffer->GetColorAttachmentAsTextureObject(0);
+        if (!texture || texture->GetHandle() == 0)
+            return;
+
+        ImGui::GetBackgroundDrawList()->AddImage(
+                (ImTextureID)(intptr_t)texture->GetHandle(),
+                ImVec2(0.f, 0.f),
+                ImVec2(static_cast<float>(width), static_cast<float>(height)),
+                ImVec2(0.f, 1.f),
+                ImVec2(1.f, 0.f));
     }
 
     double norm3(const double v[3])
@@ -196,6 +256,148 @@ namespace
 
         state.slice->SetExtent(extent);
         state.slice->Modified();
+    }
+
+    Visualization_method current_method(Viz_state& state)
+    {
+        state.method = std::clamp(state.method, 0, 3);
+        return static_cast<Visualization_method>(state.method);
+    }
+
+    std::size_t point_id(const int nx, const int ny, const int i, const int j, const int k)
+    {
+        return static_cast<std::size_t>((k*ny + j)*nx + i);
+    }
+
+    void update_visibility(Viz_state& state)
+    {
+        const auto method = current_method(state);
+        const bool has_velocity = state.vector_data && state.vector_data->GetNumberOfPoints() > 0;
+
+        state.slice_actor->SetVisibility(method == Visualization_method::Scalar_slice ? 1 : 0);
+        state.volume_actor->SetVisibility(method == Visualization_method::Scalar_volume ? 1 : 0);
+        state.vector_actor->SetVisibility(
+                method == Visualization_method::Velocity_glyphs && has_velocity ? 1 : 0);
+        state.stream_actor->SetVisibility(
+                method == Visualization_method::Velocity_streamlines && has_velocity ? 1 : 0);
+    }
+
+    void update_volume_transfer(Viz_state& state)
+    {
+        const double min_value = state.scalar_min;
+        const double max_value = state.scalar_min == state.scalar_max
+                ? state.scalar_max + 1.
+                : state.scalar_max;
+        const double mid_value = 0.5*(min_value + max_value);
+        const double opacity_scale = std::clamp(static_cast<double>(state.volume_opacity_scale), 0., 10.);
+
+        state.volume_color->RemoveAllPoints();
+        state.volume_color->AddRGBPoint(min_value, 0.05, 0.18, 0.85);
+        state.volume_color->AddRGBPoint(mid_value, 0.92, 0.92, 0.86);
+        state.volume_color->AddRGBPoint(max_value, 0.90, 0.12, 0.08);
+
+        state.volume_opacity->RemoveAllPoints();
+        state.volume_opacity->AddPoint(min_value, 0.00);
+        state.volume_opacity->AddPoint(mid_value, 0.035*opacity_scale);
+        state.volume_opacity->AddPoint(max_value, 0.18*opacity_scale);
+        state.volume_property->Modified();
+    }
+
+    void update_streamline_settings(Viz_state& state)
+    {
+        const double length = std::max(1.e-6, state.max_extent);
+        state.stream_tracer->SetMaximumPropagation(2.5*length);
+        state.stream_tracer->SetIntegrationStepUnit(vtkStreamTracer::LENGTH_UNIT);
+        state.stream_tracer->SetInitialIntegrationStep(0.01*length);
+        state.stream_tracer->SetMinimumIntegrationStep(0.001*length);
+        state.stream_tracer->SetMaximumIntegrationStep(0.05*length);
+        state.stream_tracer->SetMaximumNumberOfSteps(2000);
+        state.stream_tracer->SetTerminalSpeed(1.e-12);
+        state.stream_tracer->Modified();
+    }
+
+    void update_scalar_image(Viz_state& state, vtkFloatArray* scalars)
+    {
+        state.scalar_image->SetDimensions(state.dims[0], state.dims[1], state.dims[2]);
+
+        double bounds[6] = {0., 1., 0., 1., 0., 1.};
+        state.grid->GetBounds(bounds);
+        state.scalar_image->SetOrigin(bounds[0], bounds[2], bounds[4]);
+        state.scalar_image->SetSpacing(
+                state.dims[0] > 1 ? (bounds[1] - bounds[0]) / (state.dims[0] - 1) : 1.,
+                state.dims[1] > 1 ? (bounds[3] - bounds[2]) / (state.dims[1] - 1) : 1.,
+                state.dims[2] > 1 ? (bounds[5] - bounds[4]) / (state.dims[2] - 1) : 1.);
+        state.scalar_image->GetPointData()->SetScalars(scalars);
+        state.scalar_image->Modified();
+    }
+
+    template<typename Snapshot>
+    void update_velocity_polydata(Viz_state& state, const Snapshot& snapshot)
+    {
+        vtkNew<vtkPoints> vector_points;
+        vector_points->SetDataTypeToFloat();
+
+        vtkNew<vtkFloatArray> vector_vectors;
+        vtkNew<vtkFloatArray> vector_magnitude;
+        vector_vectors->SetName("velocity");
+        vector_vectors->SetNumberOfComponents(3);
+        vector_magnitude->SetName("velocity_magnitude");
+        vector_magnitude->SetNumberOfComponents(1);
+
+        if (!snapshot.vectors.empty())
+        {
+            const int stride = std::max(1, state.vector_stride);
+            for (int k=0; k<snapshot.nz; k += stride)
+                for (int j=0; j<snapshot.ny; j += stride)
+                    for (int i=0; i<snapshot.nx; i += stride)
+                    {
+                        const auto id = point_id(snapshot.nx, snapshot.ny, i, j, k);
+                        const std::size_t point_offset = 3*id;
+                        const std::size_t vector_offset = 3*id;
+                        const float u = snapshot.vectors[vector_offset];
+                        const float v = snapshot.vectors[vector_offset+1];
+                        const float w = snapshot.vectors[vector_offset+2];
+                        const float mag = std::sqrt(u*u + v*v + w*w);
+
+                        vector_points->InsertNextPoint(
+                                snapshot.points[point_offset],
+                                snapshot.points[point_offset+1],
+                                snapshot.points[point_offset+2]);
+                        vector_vectors->InsertNextTuple3(u, v, w);
+                        vector_magnitude->InsertNextValue(mag);
+                    }
+        }
+
+        state.vector_data->SetPoints(vector_points);
+        state.vector_data->GetPointData()->SetVectors(vector_vectors);
+        state.vector_data->GetPointData()->AddArray(vector_magnitude);
+        state.vector_data->Modified();
+    }
+
+    template<typename Snapshot>
+    void update_streamline_seeds(Viz_state& state, const Snapshot& snapshot)
+    {
+        vtkNew<vtkPoints> seed_points;
+        seed_points->SetDataTypeToFloat();
+
+        if (!snapshot.vectors.empty())
+        {
+            const int stride = std::max(1, state.streamline_stride);
+            for (int k=0; k<snapshot.nz; k += stride)
+                for (int j=0; j<snapshot.ny; j += stride)
+                    for (int i=0; i<snapshot.nx; i += stride)
+                    {
+                        const auto id = point_id(snapshot.nx, snapshot.ny, i, j, k);
+                        const std::size_t point_offset = 3*id;
+                        seed_points->InsertNextPoint(
+                                snapshot.points[point_offset],
+                                snapshot.points[point_offset+1],
+                                snapshot.points[point_offset+2]);
+                    }
+        }
+
+        state.streamline_seed_data->SetPoints(seed_points);
+        state.streamline_seed_data->Modified();
     }
 
     template<typename TF>
@@ -276,6 +478,9 @@ namespace
             state.grid->GetPointData()->AddArray(vector_magnitude);
         }
         state.grid->Modified();
+        update_scalar_image(state, scalars);
+        update_velocity_polydata(state, snapshot);
+        update_streamline_seeds(state, snapshot);
 
         const float scalar_range_min = state.scalar_min == state.scalar_max
             ? state.scalar_min - 1.f : state.scalar_min;
@@ -292,22 +497,21 @@ namespace
         state.vector_lut->SetTableRange(vector_range_min, vector_range_max);
         state.vector_lut->Build();
         state.vector_mapper->SetScalarRange(vector_range_min, vector_range_max);
-
-        state.vector_actor->SetVisibility(
-                state.show_velocity && !snapshot.vectors.empty() ? 1 : 0);
+        state.stream_mapper->SetScalarRange(vector_range_min, vector_range_max);
 
         update_slice_extent(state);
-        state.vector_mask->SetOnRatio(std::max(1, state.vector_on_ratio));
-        state.vector_mask->Modified();
 
         double bounds[6] = {0., 1., 0., 1., 0., 1.};
         state.grid->GetBounds(bounds);
-        const double max_extent = std::max({
+        state.max_extent = std::max({
                 bounds[1] - bounds[0],
                 bounds[3] - bounds[2],
                 bounds[5] - bounds[4],
                 1.});
-        state.vector_mapper->SetScaleFactor(state.glyph_scale * max_extent * 0.04);
+        state.vector_mapper->SetScaleFactor(state.glyph_scale * state.max_extent * 0.04);
+        update_volume_transfer(state);
+        update_streamline_settings(state);
+        update_visibility(state);
 
         state.needs_dataset_update = false;
 
@@ -456,9 +660,20 @@ namespace
         state.outline_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
         state.outline_actor = vtkSmartPointer<vtkActor>::New();
         state.arrow = vtkSmartPointer<vtkArrowSource>::New();
-        state.vector_mask = vtkSmartPointer<vtkMaskPoints>::New();
+        state.vector_data = vtkSmartPointer<vtkPolyData>::New();
         state.vector_mapper = vtkSmartPointer<vtkGlyph3DMapper>::New();
         state.vector_actor = vtkSmartPointer<vtkActor>::New();
+        state.streamline_seed_data = vtkSmartPointer<vtkPolyData>::New();
+        state.stream_integrator = vtkSmartPointer<vtkRungeKutta4>::New();
+        state.stream_tracer = vtkSmartPointer<vtkStreamTracer>::New();
+        state.stream_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        state.stream_actor = vtkSmartPointer<vtkActor>::New();
+        state.scalar_image = vtkSmartPointer<vtkImageData>::New();
+        state.volume_mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
+        state.volume_actor = vtkSmartPointer<vtkVolume>::New();
+        state.volume_property = vtkSmartPointer<vtkVolumeProperty>::New();
+        state.volume_color = vtkSmartPointer<vtkColorTransferFunction>::New();
+        state.volume_opacity = vtkSmartPointer<vtkPiecewiseFunction>::New();
         state.scalar_lut = vtkSmartPointer<vtkLookupTable>::New();
         state.vector_lut = vtkSmartPointer<vtkLookupTable>::New();
 
@@ -485,9 +700,10 @@ namespace
         state.render_window->AddObserver(vtkCommand::WindowIsDirectEvent, state.is_direct_callback);
         state.render_window->AddObserver(vtkCommand::WindowFrameEvent, state.frame_callback);
         state.render_window->SetOwnContext(false);
+        state.render_window->SetOffScreenRendering(true);
         state.render_window->SetFrameBlitModeToNoBlit();
         state.render_window->SetReadyForRendering(true);
-        state.render_window->SetSwapBuffers(false);
+        state.render_window->SetSwapBuffers(true);
         state.render_window->AddRenderer(state.renderer);
         state.renderer->SetBackground(0.08, 0.09, 0.1);
 
@@ -513,10 +729,7 @@ namespace
         state.outline_actor->GetProperty()->SetColor(0.88, 0.88, 0.82);
         state.outline_actor->GetProperty()->SetLineWidth(1.5);
 
-        state.vector_mask->SetInputData(state.grid);
-        state.vector_mask->RandomModeOff();
-        state.vector_mask->SetOnRatio(state.vector_on_ratio);
-        state.vector_mapper->SetInputConnection(state.vector_mask->GetOutputPort());
+        state.vector_mapper->SetInputData(state.vector_data);
         state.vector_mapper->SetSourceConnection(state.arrow->GetOutputPort());
         state.vector_mapper->SetLookupTable(state.vector_lut);
         state.vector_mapper->SetOrientationArray("velocity");
@@ -529,15 +742,37 @@ namespace
         state.vector_mapper->ScalingOn();
         state.vector_actor->SetMapper(state.vector_mapper);
 
+        state.stream_tracer->SetInputData(state.grid);
+        state.stream_tracer->SetSourceData(state.streamline_seed_data);
+        state.stream_tracer->SetIntegrator(state.stream_integrator);
+        state.stream_tracer->SetIntegrationDirectionToBoth();
+        state.stream_mapper->SetInputConnection(state.stream_tracer->GetOutputPort());
+        state.stream_mapper->SetLookupTable(state.vector_lut);
+        state.stream_mapper->SetScalarModeToUsePointFieldData();
+        state.stream_mapper->SelectColorArray("velocity_magnitude");
+        state.stream_mapper->ScalarVisibilityOn();
+        state.stream_actor->SetMapper(state.stream_mapper);
+        state.stream_actor->GetProperty()->SetLineWidth(1.3);
+
+        state.volume_mapper->SetInputData(state.scalar_image);
+        state.volume_property->SetColor(state.volume_color);
+        state.volume_property->SetScalarOpacity(state.volume_opacity);
+        state.volume_property->SetInterpolationTypeToLinear();
+        state.volume_property->ShadeOff();
+        state.volume_actor->SetMapper(state.volume_mapper);
+        state.volume_actor->SetProperty(state.volume_property);
+
         state.renderer->AddActor(state.slice_actor);
+        state.renderer->AddVolume(state.volume_actor);
         state.renderer->AddActor(state.outline_actor);
         state.renderer->AddActor(state.vector_actor);
+        state.renderer->AddActor(state.stream_actor);
     }
 
     void render_gui(Viz_state& state)
     {
         ImGui::SetNextWindowPos(ImVec2(14.f, 14.f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(310.f, 0.f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(330.f, 0.f), ImGuiCond_FirstUseEver);
         ImGui::Begin("MicroHH Viz");
 
         ImGui::Text("iter %d  time %.6g  dt %.3g", state.iteration, state.time, state.dt);
@@ -551,12 +786,27 @@ namespace
         if (ImGui::Button("Restart"))
             state.restart_requested = true;
 
+        const char* method_labels[] = {
+                "Scalar slice",
+                "Scalar volume",
+                "Velocity glyphs",
+                "Velocity streamlines"};
+        if (ImGui::Combo("Method", &state.method, method_labels, 4))
+            update_visibility(state);
+
+        const auto method = current_method(state);
+        const bool scalar_method = method == Visualization_method::Scalar_slice
+                || method == Visualization_method::Scalar_volume;
+        const bool glyph_method = method == Visualization_method::Velocity_glyphs;
+        const bool streamline_method = method == Visualization_method::Velocity_streamlines;
+
         std::vector<const char*> scalar_labels;
         scalar_labels.reserve(state.scalar_names.size());
         for (const auto& name : state.scalar_names)
             scalar_labels.push_back(name.c_str());
 
-        if (ImGui::Combo(
+        if (scalar_method
+                && ImGui::Combo(
                     "Scalar",
                     &state.scalar_index,
                     scalar_labels.data(),
@@ -569,29 +819,37 @@ namespace
             state.reset_camera = true;
         }
 
-        const char* axes[] = {"X", "Y", "Z"};
-        if (ImGui::Combo("Slice axis", &state.slice_axis, axes, 3))
-            update_slice_extent(state);
-
-        const int axis_max = std::max(0, state.dims[state.slice_axis]-1);
-        if (ImGui::SliderInt("Slice", &state.slice_index, 0, axis_max))
-            update_slice_extent(state);
-
-        if (ImGui::Checkbox("Velocity", &state.show_velocity))
-            state.vector_actor->SetVisibility(state.show_velocity ? 1 : 0);
-
-        if (ImGui::SliderInt("Vector stride", &state.vector_on_ratio, 1, 64))
+        if (method == Visualization_method::Scalar_slice)
         {
-            state.vector_mask->SetOnRatio(std::max(1, state.vector_on_ratio));
-            state.vector_mask->Modified();
+            const char* axes[] = {"X", "Y", "Z"};
+            if (ImGui::Combo("Slice axis", &state.slice_axis, axes, 3))
+                update_slice_extent(state);
+
+            const int axis_max = std::max(0, state.dims[state.slice_axis]-1);
+            if (ImGui::SliderInt("Slice", &state.slice_index, 0, axis_max))
+                update_slice_extent(state);
         }
 
-        if (ImGui::SliderFloat("Vector scale", &state.glyph_scale, 0.05f, 5.f))
+        if (method == Visualization_method::Scalar_volume
+                && ImGui::SliderFloat("Volume opacity", &state.volume_opacity_scale, 0.05f, 8.f))
+            update_volume_transfer(state);
+
+        if (glyph_method && ImGui::SliderInt("Vector stride", &state.vector_stride, 1, 64))
             state.needs_dataset_update = true;
 
-        ImGui::Text("scalar %.6g .. %.6g", state.scalar_min, state.scalar_max);
-        if (state.show_velocity)
+        if (glyph_method && ImGui::SliderFloat("Vector scale", &state.glyph_scale, 0.05f, 100.f))
+            state.needs_dataset_update = true;
+
+        if (streamline_method && ImGui::SliderInt("Seed stride", &state.streamline_stride, 1, 64))
+            state.needs_dataset_update = true;
+
+        if (scalar_method)
+            ImGui::Text("scalar %.6g .. %.6g", state.scalar_min, state.scalar_max);
+        else
             ImGui::Text("speed %.6g .. %.6g", state.vector_min, state.vector_max);
+
+        if (!scalar_method && (!state.vector_data || state.vector_data->GetNumberOfPoints() == 0))
+            ImGui::Text("velocity unavailable");
 
         ImGui::End();
     }
@@ -665,19 +923,27 @@ void run_visualizer(Model_viz<TF>& model)
             continue;
 
         glfwMakeContextCurrent(state.window);
-        glViewport(0, 0, width, height);
         state.render_window->SetSize(width, height);
+        bind_glfw_framebuffer(state, width, height);
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         render_gui(state);
         apply_mouse_camera(state);
-        ImGui::Render();
 
         glfwMakeContextCurrent(state.window);
+        bind_glfw_framebuffer(state, width, height);
         state.render_window->Render();
+
         glfwMakeContextCurrent(state.window);
+        bind_glfw_framebuffer(state, width, height);
+        glClearColor(0.08f, 0.09f, 0.1f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        draw_vtk_background(state, width, height);
+
+        ImGui::Render();
+        bind_glfw_framebuffer(state, width, height);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(state.window);
     }

@@ -50,12 +50,15 @@ find_package(VTK CONFIG REQUIRED
     CommonDataModel
     FiltersCore
     FiltersGeneral
+    FiltersFlowPaths
     FiltersGeometry
     FiltersModeling
     FiltersSources
     RenderingCore
     RenderingFreeType
-    RenderingOpenGL2)
+    RenderingOpenGL2
+    RenderingVolume
+    RenderingVolumeOpenGL2)
 
 add_executable(
   microhh_viz
