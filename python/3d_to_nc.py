@@ -27,7 +27,7 @@ import glob
 import struct
 import time as tm
 import numpy as np
-from multiprocessing import Pool
+import multiprocessing as mp
 
 def convert_to_nc(variables):
     half_level_vars = ['w', 'lflx', 'sflx']
@@ -89,117 +89,144 @@ def convert_to_nc(variables):
             print("Failed to create %s" % filename)
 
 
-# Parse command line and namelist options
-parser = argparse.ArgumentParser(
-    description='Convert MicroHH 3D binary to netCDF4 files.')
-parser.add_argument('-d', '--directory', help='directory')
-parser.add_argument('-f', '--filename', help='ini file name')
-parser.add_argument('-v', '--vars', nargs='*', help='variable names')
-parser.add_argument(
-    '-p',
-    '--precision',
-    help='precision',
-    choices=[
-        'single',
-         'double'])
-parser.add_argument(
-    '-o',
-    '--order',
-    help='order',
-    choices=[
-        2, 4], type = int)
-parser.add_argument(
-    '-t0',
-    '--starttime',
-    help='first time step to be parsed',
-    type=float)
-parser.add_argument(
-    '-t1',
-    '--endtime',
-    help='last time step to be parsed',
-    type=float)
-parser.add_argument(
-    '-tstep',
-    '--sampletime',
-    help='time interval to be parsed',
-    type=float)
-parser.add_argument(
-    '-s',
-    '--perslice',
-    help='read/write per horizontal slice',
-    action='store_true')
-parser.add_argument(
-    '-c',
-    '--nocompression',
-    help='do not compress the netcdf file',
-    action='store_true')
-parser.add_argument(
-    '-kmax',
-    '--kmax',
-    help='reduce vertical extent 3D files',
-    type=int)
+def parse_command_line():
+    parser = argparse.ArgumentParser(
+        description='Convert MicroHH 3D binary to netCDF4 files.')
+    parser.add_argument('-d', '--directory', help='directory')
+    parser.add_argument('-f', '--filename', help='ini file name')
+    parser.add_argument('-v', '--vars', nargs='*', help='variable names')
+    parser.add_argument(
+        '-p',
+        '--precision',
+        help='precision',
+        choices=[
+            'single',
+             'double'])
+    parser.add_argument(
+        '-o',
+        '--order',
+        help='order',
+        choices=[
+            2, 4], type = int)
+    parser.add_argument(
+        '-t0',
+        '--starttime',
+        help='first time step to be parsed',
+        type=float)
+    parser.add_argument(
+        '-t1',
+        '--endtime',
+        help='last time step to be parsed',
+        type=float)
+    parser.add_argument(
+        '-tstep',
+        '--sampletime',
+        help='time interval to be parsed',
+        type=float)
+    parser.add_argument(
+        '-s',
+        '--perslice',
+        help='read/write per horizontal slice',
+        action='store_true')
+    parser.add_argument(
+        '-c',
+        '--nocompression',
+        help='do not compress the netcdf file',
+        action='store_true')
+    parser.add_argument(
+        '-kmax',
+        '--kmax',
+        help='reduce vertical extent 3D files',
+        type=int)
 
-parser.add_argument('-n', '--nprocs', help='Number of processes', type=int)
+    parser.add_argument('-n', '--nprocs', help='Number of processes', type=int)
 
-args = parser.parse_args()
+    return parser.parse_args()
 
-if args.directory is not None:
-    os.chdir(args.directory)
 
-nl = mht.Read_namelist(args.filename)
-itot = nl['grid']['itot']
-jtot = nl['grid']['jtot']
-ktot = nl['grid']['ktot']
-kmax = args.kmax if args.kmax is not None else ktot
-kmax = min(kmax, ktot)
+def normalize_variables(variables):
+    if isinstance(variables, str):
+        variables = [variables]
 
-starttime = args.starttime if args.starttime is not None else nl['time']['starttime']
-endtime = args.endtime if args.endtime is not None else nl['time']['endtime']
-sampletime = args.sampletime if args.sampletime is not None else nl['dump']['sampletime']
-try:
-    doubledump = (nl['dump']['swdoubledump']==1)
-except:
-    doubledump = False
+    if len(variables) == 1:
+        variables = variables[0].strip('[]').split(',')
 
-try:
-    iotimeprec = nl['time']['iotimeprec']
-except KeyError:
-    iotimeprec = 0.
+    return [variable.strip() for variable in variables if variable.strip()]
 
-variables = args.vars if args.vars is not None else nl['dump']['dumplist']
-if isinstance(variables, str):
-    variables = [variables]
 
-precision = args.precision
-perslice = args.perslice
-compression = not(args.nocompression)
-nprocs = args.nprocs if args.nprocs is not None else len(variables)
+def main():
+    global compression
+    global doubledump
+    global grid
+    global iotimeprec
+    global itot
+    global jtot
+    global kmax
+    global ktot
+    global perslice
+    global precision
+    global sampletime
+    global starttime
+    global endtime
 
-try:
-    order = args.order if args.order is not None else nl['grid']['swspatialorder']
-except KeyError:
-    order = 2
+    args = parse_command_line()
 
-# Calculate the number of iterations
-for time in np.arange(starttime, endtime, sampletime):
-    otime = int(round(time / 10**iotimeprec))
-    if not glob.glob('*.{0:07d}'.format(otime)):
-        endtime = time - sampletime
-        break
+    if args.directory is not None:
+        os.chdir(args.directory)
 
-niter = int((endtime - starttime) / sampletime + 1)
+    nl = mht.Read_namelist(args.filename)
+    itot = nl['grid']['itot']
+    jtot = nl['grid']['jtot']
+    ktot = nl['grid']['ktot']
+    kmax = args.kmax if args.kmax is not None else ktot
+    kmax = min(kmax, ktot)
 
-grid = mht.Read_grid(itot, jtot, ktot, order = order)
+    starttime = args.starttime if args.starttime is not None else nl['time']['starttime']
+    endtime = args.endtime if args.endtime is not None else nl['time']['endtime']
+    sampletime = args.sampletime if args.sampletime is not None else nl['dump']['sampletime']
+    try:
+        doubledump = (nl['dump']['swdoubledump']==1)
+    except:
+        doubledump = False
 
-if kmax < ktot:
-    grid.dim['z'] = grid.dim['z'][:kmax]
-    grid.dim['zh'] = grid.dim['zh'][:kmax+1]
+    try:
+        iotimeprec = nl['time']['iotimeprec']
+    except KeyError:
+        iotimeprec = 0.
 
-chunks = [variables[i::nprocs] for i in range(nprocs)]
+    variables = normalize_variables(
+            args.vars if args.vars is not None else nl['dump']['dumplist'])
 
-pool = Pool(processes=nprocs)
+    precision = args.precision
+    perslice = args.perslice
+    compression = not(args.nocompression)
+    nprocs = args.nprocs if args.nprocs is not None else len(variables)
 
-pool.imap_unordered(convert_to_nc, chunks)
+    try:
+        order = args.order if args.order is not None else nl['grid']['swspatialorder']
+    except KeyError:
+        order = 2
 
-pool.close()
-pool.join()
+    # Calculate the number of iterations
+    for time in np.arange(starttime, endtime, sampletime):
+        otime = int(round(time / 10**iotimeprec))
+        if not glob.glob('*.{0:07d}'.format(otime)):
+            endtime = time - sampletime
+            break
+
+    grid = mht.Read_grid(itot, jtot, ktot, order = order)
+
+    if kmax < ktot:
+        grid.dim['z'] = grid.dim['z'][:kmax]
+        grid.dim['zh'] = grid.dim['zh'][:kmax+1]
+
+    chunks = [variables[i::nprocs] for i in range(nprocs)]
+
+    ctx = mp.get_context('fork')
+    with ctx.Pool(processes=nprocs) as pool:
+        for _ in pool.imap_unordered(convert_to_nc, chunks):
+            pass
+
+
+if __name__ == '__main__':
+    main()
