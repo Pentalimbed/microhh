@@ -22,6 +22,7 @@
 find_package(OpenGL REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(OpenVDB REQUIRED)
 find_package(VTK CONFIG REQUIRED
   COMPONENTS
     CommonCore
@@ -54,6 +55,7 @@ target_link_libraries(
     ${VTK_LIBRARIES}
     glfw
     imgui::imgui
+    OpenVDB::openvdb
     OpenGL::GL
     ${NETCDF_LIB_C})
 

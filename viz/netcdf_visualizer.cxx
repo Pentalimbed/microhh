@@ -28,14 +28,20 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <sstream>
 #include <vector>
 
 #include <netcdf.h>
+
+#include <openvdb/openvdb.h>
+#include <openvdb/io/File.h>
+#include <openvdb/math/Transform.h>
 
 #include <GLFW/glfw3.h>
 
@@ -97,6 +103,13 @@ namespace
         float vector_max = 0.f;
         double time = 0.;
         int time_index = 0;
+    };
+
+    struct Vdb_export_summary
+    {
+        std::size_t frames = 0;
+        std::size_t active_voxels = 0;
+        bool resampled = false;
     };
 
     struct Camera_drag
@@ -633,6 +646,60 @@ namespace
         max_value = std::max(max_value, value);
     }
 
+    double average_axis_spacing(const std::vector<float>& axis)
+    {
+        if (axis.size() <= 1)
+            return 1.;
+
+        const double spacing =
+                static_cast<double>(axis.back() - axis.front()) /
+                static_cast<double>(axis.size() - 1);
+        return std::isfinite(spacing) && spacing != 0. ? spacing : 1.;
+    }
+
+    float linear_axis_value(const std::vector<float>& axis, const int index)
+    {
+        if (axis.empty())
+            return static_cast<float>(index);
+        if (axis.size() <= 1)
+            return axis.front();
+
+        return axis.front()
+                + static_cast<float>(index) *
+                (axis.back() - axis.front()) / static_cast<float>(axis.size() - 1);
+    }
+
+    bool axis_is_regular_for_export(const std::vector<float>& axis)
+    {
+        if (axis.size() <= 2)
+            return true;
+
+        const double reference = average_axis_spacing(axis);
+        const double tolerance = std::max(1.e-5, std::abs(reference) * 1.e-4);
+        for (std::size_t i=1; i<axis.size(); ++i)
+            if (std::abs(static_cast<double>(axis[i] - axis[i-1]) - reference) > tolerance)
+                return false;
+
+        return true;
+    }
+
+    bool axes_match_for_combination(
+            const std::vector<float>& a,
+            const std::vector<float>& b)
+    {
+        if (a.size() != b.size())
+            return false;
+
+        for (std::size_t i=0; i<a.size(); ++i)
+        {
+            const double scale = std::max({1., std::abs(static_cast<double>(a[i])), std::abs(static_cast<double>(b[i]))});
+            if (std::abs(static_cast<double>(a[i] - b[i])) > 1.e-5 * scale)
+                return false;
+        }
+
+        return true;
+    }
+
     class Dataset
     {
         public:
@@ -670,11 +737,135 @@ namespace
                 return !velocity_.empty();
             }
 
+            bool has_total_cloud_density() const
+            {
+                return scalars_.count("ql") && scalars_.count("qi");
+            }
+
             int time_count(const std::string& scalar_name) const
             {
                 if (scalar_name == "ql+qi")
                     return static_cast<int>(std::min(scalars_.at("ql").nt(), scalars_.at("qi").nt()));
                 return static_cast<int>(scalars_.at(scalar_name).nt());
+            }
+
+            Vdb_export_summary export_total_cloud_density_vdb_sequence(
+                    const fs::path& directory) const
+            {
+                if (!has_total_cloud_density())
+                    throw std::runtime_error("VDB export requires both ql.nc and qi.nc");
+
+                const auto& ql = scalars_.at("ql");
+                const auto& qi = scalars_.at("qi");
+                if (ql.nx() != qi.nx() || ql.ny() != qi.ny() || ql.nz() != qi.nz())
+                    throw std::runtime_error("ql and qi dimensions do not match");
+                if (!axes_match_for_combination(ql.x, qi.x)
+                        || !axes_match_for_combination(ql.y, qi.y)
+                        || !axes_match_for_combination(ql.z, qi.z))
+                    throw std::runtime_error("ql and qi coordinate axes do not match");
+
+                const std::size_t frame_count = std::min(ql.nt(), qi.nt());
+                if (frame_count == 0)
+                    throw std::runtime_error("No ql/qi frames are available for VDB export");
+
+                fs::create_directories(directory);
+
+                const int nx = static_cast<int>(ql.nx());
+                const int ny = static_cast<int>(ql.ny());
+                const int nz = static_cast<int>(ql.nz());
+                const bool resample_to_uniform = !axis_is_regular_for_export(ql.x)
+                        || !axis_is_regular_for_export(ql.y)
+                        || !axis_is_regular_for_export(ql.z);
+
+                std::vector<Axis_sample> x_samples;
+                std::vector<Axis_sample> y_samples;
+                std::vector<Axis_sample> z_samples;
+                if (resample_to_uniform)
+                {
+                    x_samples.reserve(ql.x.size());
+                    y_samples.reserve(ql.y.size());
+                    z_samples.reserve(ql.z.size());
+                    for (int i=0; i<nx; ++i)
+                        x_samples.push_back(locate_axis_sample(ql.x, linear_axis_value(ql.x, i)));
+                    for (int j=0; j<ny; ++j)
+                        y_samples.push_back(locate_axis_sample(ql.y, linear_axis_value(ql.y, j)));
+                    for (int k=0; k<nz; ++k)
+                        z_samples.push_back(locate_axis_sample(ql.z, linear_axis_value(ql.z, k)));
+                }
+
+                Vdb_export_summary summary;
+                summary.frames = frame_count;
+                summary.resampled = resample_to_uniform;
+
+                for (std::size_t frame=0; frame<frame_count; ++frame)
+                {
+                    auto values = ql.read_time_slice(frame);
+                    const auto qi_values = qi.read_time_slice(frame);
+                    if (qi_values.size() != values.size())
+                        throw std::runtime_error("ql and qi frame sizes do not match");
+
+                    for (std::size_t id=0; id<values.size(); ++id)
+                        values[id] += qi_values[id];
+
+                    auto grid = openvdb::FloatGrid::create(0.f);
+                    grid->setName("cloud_density");
+                    grid->setGridClass(openvdb::GRID_FOG_VOLUME);
+
+                    auto transform = openvdb::math::Transform::createLinearTransform(1.);
+                    transform->postScale(openvdb::math::Vec3d(
+                                average_axis_spacing(ql.x),
+                                average_axis_spacing(ql.y),
+                                average_axis_spacing(ql.z)));
+                    transform->postTranslate(openvdb::math::Vec3d(
+                                ql.x.empty() ? 0. : ql.x.front(),
+                                ql.y.empty() ? 0. : ql.y.front(),
+                                ql.z.empty() ? 0. : ql.z.front()));
+                    grid->setTransform(transform);
+
+                    grid->insertMeta("microhh_source", openvdb::StringMetadata("ql+qi"));
+                    grid->insertMeta("microhh_time", openvdb::DoubleMetadata(ql.time_value(frame)));
+                    grid->insertMeta("microhh_time_index", openvdb::Int32Metadata(static_cast<std::int32_t>(frame)));
+                    grid->insertMeta("microhh_resampled_to_uniform", openvdb::StringMetadata(resample_to_uniform ? "true" : "false"));
+
+                    auto accessor = grid->getAccessor();
+                    std::size_t active_voxels = 0;
+                    for (int k=0; k<nz; ++k)
+                        for (int j=0; j<ny; ++j)
+                            for (int i=0; i<nx; ++i)
+                            {
+                                const float value = resample_to_uniform
+                                        ? sample_component(
+                                                values, nx, ny,
+                                                x_samples[static_cast<std::size_t>(i)],
+                                                y_samples[static_cast<std::size_t>(j)],
+                                                z_samples[static_cast<std::size_t>(k)])
+                                        : values[point_id(nx, ny, i, j, k)];
+
+                                if (std::isfinite(value) && value > 0.f)
+                                {
+                                    accessor.setValue(openvdb::Coord(i, j, k), value);
+                                    ++active_voxels;
+                                }
+                            }
+
+                    grid->insertMeta("microhh_active_voxels", openvdb::Int64Metadata(static_cast<std::int64_t>(active_voxels)));
+                    grid->tree().prune();
+
+                    std::ostringstream filename;
+                    filename << "cloud_density_"
+                        << std::setw(6) << std::setfill('0') << frame
+                        << ".vdb";
+
+                    openvdb::GridPtrVec grids;
+                    grids.push_back(grid);
+                    openvdb::io::File file((directory / filename.str()).string());
+                    file.write(grids);
+                    file.close();
+
+                    summary.active_voxels += active_voxels;
+                }
+
+                return summary;
             }
 
             Snapshot snapshot(
@@ -881,6 +1072,9 @@ namespace
         float volume_opacity_scale = 1.f;
         float playback_rate = 8.f;
         std::array<float, 3> display_scale = {{1.f, 1.f, 1.f}};
+        fs::path export_directory;
+        std::string export_message;
+        bool export_failed = false;
 
         std::array<int, 3> dims = {{1, 1, 1}};
         float scalar_min = 0.f;
@@ -1764,6 +1958,45 @@ namespace
         if (state.show_vectors && (!dataset.has_velocity() || !state.vector_data || state.vector_data->GetNumberOfPoints() == 0))
             ImGui::Text("velocity unavailable");
 
+        ImGui::Separator();
+        if (!state.export_directory.empty())
+            ImGui::TextWrapped("VDB dir %s", state.export_directory.string().c_str());
+
+        const bool can_export_vdb = dataset.has_total_cloud_density();
+        if (!can_export_vdb)
+            ImGui::BeginDisabled();
+
+        if (ImGui::Button("Export cloud VDB sequence"))
+        {
+            try
+            {
+                const auto summary = dataset.export_total_cloud_density_vdb_sequence(state.export_directory);
+                std::ostringstream message;
+                message << "exported " << summary.frames << " frames";
+                if (summary.resampled)
+                    message << " (resampled)";
+                message << " to " << state.export_directory.string();
+                state.export_message = message.str();
+                state.export_failed = false;
+            }
+            catch (const std::exception& e)
+            {
+                state.export_message = e.what();
+                state.export_failed = true;
+            }
+        }
+
+        if (!can_export_vdb)
+            ImGui::EndDisabled();
+
+        if (!state.export_message.empty())
+        {
+            if (state.export_failed)
+                ImGui::TextColored(ImVec4(1.f, 0.34f, 0.24f, 1.f), "%s", state.export_message.c_str());
+            else
+                ImGui::TextWrapped("%s", state.export_message.c_str());
+        }
+
         ImGui::End();
     }
 
@@ -1830,7 +2063,10 @@ namespace
             << "The viewer reads NetCDF files produced by python/3d_to_nc.py.\n";
     }
 
-    void run_visualizer(const Dataset& dataset, const Case_settings& case_settings)
+    void run_visualizer(
+            const Dataset& dataset,
+            const Case_settings& case_settings,
+            const fs::path& source_directory)
     {
         Viz_state state;
         state.scalar_names = dataset.scalar_names();
@@ -1838,6 +2074,7 @@ namespace
                 it != state.scalar_names.end())
             state.scalar_index = static_cast<int>(std::distance(state.scalar_names.begin(), it));
         state.case_settings = case_settings;
+        state.export_directory = (source_directory.empty() ? fs::current_path() : source_directory) / "vdb";
         if (state.case_settings.has_domain_size)
             state.display_scale = state.case_settings.display_scale;
 
@@ -1950,9 +2187,11 @@ int main(int argc, char** argv)
         }
 
         const auto paths = discover_paths(args);
-        const auto case_settings = read_case_settings(common_parent_directory(paths));
+        const auto source_directory = common_parent_directory(paths);
+        const auto case_settings = read_case_settings(source_directory);
+        openvdb::initialize();
         Dataset dataset(paths);
-        run_visualizer(dataset, case_settings);
+        run_visualizer(dataset, case_settings, source_directory);
     }
     catch (const std::exception& e)
     {
