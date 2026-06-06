@@ -24,13 +24,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
-#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -49,7 +49,6 @@
 #include <vtkCallbackCommand.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkCommand.h>
-#include <vtkDataSetMapper.h>
 #include <vtkFloatArray.h>
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkGlyph3DMapper.h>
@@ -71,7 +70,6 @@
 #include <vtkSmartVolumeMapper.h>
 #include <vtkStreamTracer.h>
 #include <vtkStructuredGrid.h>
-#include <vtkStructuredGridGeometryFilter.h>
 #include <vtkTextureObject.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
@@ -80,15 +78,7 @@ namespace
 {
     namespace fs = std::filesystem;
 
-    enum class Slice_axis { X = 0, Y = 1, Z = 2 };
-
-    enum class Visualization_method
-    {
-        Scalar_slice = 0,
-        Scalar_volume = 1,
-        Velocity_glyphs = 2,
-        Velocity_streamlines = 3
-    };
+    enum class Vector_mode { Glyphs = 0, Streamlines = 1 };
 
     struct Snapshot
     {
@@ -120,7 +110,11 @@ namespace
     {
         fs::path ini_path;
         bool has_domain_size = false;
+        bool has_grid_size = false;
+        bool has_cell_size = false;
         std::array<double, 3> domain_size = {{1., 1., 1.}};
+        std::array<double, 3> grid_size = {{1., 1., 1.}};
+        std::array<double, 3> cell_size = {{1., 1., 1.}};
         std::array<float, 3> display_scale = {{1.f, 1.f, 1.f}};
     };
 
@@ -205,8 +199,8 @@ namespace
 
         for (std::size_t i=0; i<scale.size(); ++i)
         {
-            if (size[i] > 0. && std::isfinite(size[i]) && std::isfinite(max_size))
-                scale[i] = static_cast<float>(std::clamp(max_size / size[i], 0.01, 1000.));
+            if (size[i] > 0. && std::isfinite(size[i]) && max_size > 0. && std::isfinite(max_size))
+                scale[i] = static_cast<float>(std::clamp(size[i] / max_size, 0.01, 1000.));
         }
 
         return scale;
@@ -251,6 +245,9 @@ namespace
         bool have_x = false;
         bool have_y = false;
         bool have_z = false;
+        bool have_itot = false;
+        bool have_jtot = false;
+        bool have_ktot = false;
 
         for (std::string line; std::getline(input, line);)
         {
@@ -293,10 +290,33 @@ namespace
                 settings.domain_size[2] = parsed;
                 have_z = true;
             }
+            else if (key == "itot")
+            {
+                settings.grid_size[0] = parsed;
+                have_itot = true;
+            }
+            else if (key == "jtot")
+            {
+                settings.grid_size[1] = parsed;
+                have_jtot = true;
+            }
+            else if (key == "ktot")
+            {
+                settings.grid_size[2] = parsed;
+                have_ktot = true;
+            }
         }
 
         settings.has_domain_size = have_x && have_y && have_z;
-        if (settings.has_domain_size)
+        settings.has_grid_size = have_itot && have_jtot && have_ktot;
+        settings.has_cell_size = settings.has_domain_size && settings.has_grid_size;
+        if (settings.has_cell_size)
+        {
+            for (std::size_t i=0; i<settings.cell_size.size(); ++i)
+                settings.cell_size[i] = settings.domain_size[i] / settings.grid_size[i];
+            settings.display_scale = normalized_display_scale(settings.cell_size);
+        }
+        else if (settings.has_domain_size)
             settings.display_scale = normalized_display_scale(settings.domain_size);
 
         return settings;
@@ -634,6 +654,8 @@ namespace
                 }
 
                 std::sort(scalar_names_.begin(), scalar_names_.end());
+                if (scalars_.count("ql") && scalars_.count("qi"))
+                    scalar_names_.push_back("ql+qi");
                 if (scalar_names_.empty())
                     throw std::runtime_error("No scalar NetCDF dumps were loaded. Expected files such as ql.nc or qi.nc.");
             }
@@ -650,6 +672,8 @@ namespace
 
             int time_count(const std::string& scalar_name) const
             {
+                if (scalar_name == "ql+qi")
+                    return static_cast<int>(std::min(scalars_.at("ql").nt(), scalars_.at("qi").nt()));
                 return static_cast<int>(scalars_.at(scalar_name).nt());
             }
 
@@ -659,7 +683,8 @@ namespace
                     const int stride,
                     const bool include_velocity) const
             {
-                const auto& scalar = scalars_.at(scalar_name);
+                const bool combined_scalar = scalar_name == "ql+qi";
+                const auto& scalar = combined_scalar ? scalars_.at("ql") : scalars_.at(scalar_name);
                 const int source_nx = static_cast<int>(scalar.nx());
                 const int source_ny = static_cast<int>(scalar.ny());
                 const int source_nz = static_cast<int>(scalar.nz());
@@ -675,7 +700,15 @@ namespace
                 snapshot.time_index = std::clamp(time_index, 0, static_cast<int>(scalar.nt()) - 1);
                 snapshot.time = scalar.time_value(static_cast<std::size_t>(snapshot.time_index));
 
-                const auto scalar_values = scalar.read_time_slice(static_cast<std::size_t>(snapshot.time_index));
+                auto scalar_values = scalar.read_time_slice(static_cast<std::size_t>(snapshot.time_index));
+                if (combined_scalar)
+                {
+                    const auto qi_values = scalars_.at("qi").read_time_slice(static_cast<std::size_t>(snapshot.time_index));
+                    if (qi_values.size() != scalar_values.size())
+                        throw std::runtime_error("ql+qi requires ql and qi to have identical dimensions");
+                    for (std::size_t id=0; id<scalar_values.size(); ++id)
+                        scalar_values[id] += qi_values[id];
+                }
 
                 std::map<std::string, std::vector<float>> velocity_values;
                 if (include_velocity)
@@ -803,9 +836,6 @@ namespace
         vtkSmartPointer<vtkGenericOpenGLRenderWindow> render_window;
         vtkSmartPointer<vtkRenderer> renderer;
         vtkSmartPointer<vtkStructuredGrid> grid;
-        vtkSmartPointer<vtkStructuredGridGeometryFilter> slice;
-        vtkSmartPointer<vtkDataSetMapper> slice_mapper;
-        vtkSmartPointer<vtkActor> slice_actor;
         vtkSmartPointer<vtkOutlineFilter> outline;
         vtkSmartPointer<vtkPolyDataMapper> outline_mapper;
         vtkSmartPointer<vtkActor> outline_actor;
@@ -834,15 +864,15 @@ namespace
 
         Case_settings case_settings;
         std::vector<std::string> scalar_names;
-        int method = static_cast<int>(Visualization_method::Scalar_slice);
+        bool show_scalar = true;
+        bool show_vectors = false;
+        int vector_mode = static_cast<int>(Vector_mode::Glyphs);
         int scalar_index = 0;
         int time_index = 0;
         int max_time_index = 0;
         int stride = 1;
         int vector_stride = 8;
         int streamline_stride = 10;
-        int slice_axis = static_cast<int>(Slice_axis::Z);
-        int slice_index = 0;
         bool playing = false;
         bool needs_dataset_update = true;
         bool reset_camera = true;
@@ -963,47 +993,51 @@ namespace
         out[2] = a[0]*b[1] - a[1]*b[0];
     }
 
-    Visualization_method current_method(Viz_state& state)
+    void zero_camera_roll(vtkCamera* camera)
     {
-        state.method = std::clamp(state.method, 0, 3);
-        return static_cast<Visualization_method>(state.method);
+        double pos[3];
+        double focal[3];
+        camera->GetPosition(pos);
+        camera->GetFocalPoint(focal);
+
+        double view_dir[3] = {
+                focal[0] - pos[0],
+                focal[1] - pos[1],
+                focal[2] - pos[2]};
+        normalize3(view_dir);
+
+        const double world_up[3] = {0., 0., 1.};
+        double right[3];
+        cross3(view_dir, world_up, right);
+        if (norm3(right) < 1.e-8)
+        {
+            camera->SetViewUp(0., 1., 0.);
+            return;
+        }
+
+        normalize3(right);
+        double up[3];
+        cross3(right, view_dir, up);
+        normalize3(up);
+        camera->SetViewUp(up[0], up[1], up[2]);
     }
 
-    void update_slice_extent(Viz_state& state)
+    Vector_mode current_vector_mode(Viz_state& state)
     {
-        state.slice_index = std::max(0, state.slice_index);
-        state.slice_axis = std::clamp(state.slice_axis, 0, 2);
-
-        int extent[6] = {
-                0, state.dims[0]-1,
-                0, state.dims[1]-1,
-                0, state.dims[2]-1};
-
-        const int axis_size = std::max(1, state.dims[state.slice_axis]);
-        state.slice_index = std::min(state.slice_index, axis_size-1);
-
-        if (state.slice_axis == static_cast<int>(Slice_axis::X))
-            extent[0] = extent[1] = state.slice_index;
-        else if (state.slice_axis == static_cast<int>(Slice_axis::Y))
-            extent[2] = extent[3] = state.slice_index;
-        else
-            extent[4] = extent[5] = state.slice_index;
-
-        state.slice->SetExtent(extent);
-        state.slice->Modified();
+        state.vector_mode = std::clamp(state.vector_mode, 0, 1);
+        return static_cast<Vector_mode>(state.vector_mode);
     }
 
     void update_visibility(Viz_state& state)
     {
-        const auto method = current_method(state);
+        const auto vector_mode = current_vector_mode(state);
         const bool has_velocity = state.vector_data && state.vector_data->GetNumberOfPoints() > 0;
 
-        state.slice_actor->SetVisibility(method == Visualization_method::Scalar_slice ? 1 : 0);
-        state.volume_actor->SetVisibility(method == Visualization_method::Scalar_volume ? 1 : 0);
+        state.volume_actor->SetVisibility(state.show_scalar ? 1 : 0);
         state.vector_actor->SetVisibility(
-                method == Visualization_method::Velocity_glyphs && has_velocity ? 1 : 0);
+                state.show_vectors && vector_mode == Vector_mode::Glyphs && has_velocity ? 1 : 0);
         state.stream_actor->SetVisibility(
-                method == Visualization_method::Velocity_streamlines && has_velocity ? 1 : 0);
+                state.show_vectors && vector_mode == Vector_mode::Streamlines && has_velocity ? 1 : 0);
     }
 
     void update_actor_scale(Viz_state& state)
@@ -1011,7 +1045,6 @@ namespace
         const double xscale = std::max(0.01f, state.display_scale[0]);
         const double yscale = std::max(0.01f, state.display_scale[1]);
         const double zscale = std::max(0.01f, state.display_scale[2]);
-        state.slice_actor->SetScale(xscale, yscale, zscale);
         state.outline_actor->SetScale(xscale, yscale, zscale);
         state.vector_actor->SetScale(xscale, yscale, zscale);
         state.stream_actor->SetScale(xscale, yscale, zscale);
@@ -1232,9 +1265,7 @@ namespace
         state.max_time_index = std::max(0, dataset.time_count(scalar_name) - 1);
         state.time_index = std::clamp(state.time_index, 0, state.max_time_index);
 
-        const auto method = current_method(state);
-        const bool include_velocity = method == Visualization_method::Velocity_glyphs
-                || method == Visualization_method::Velocity_streamlines;
+        const bool include_velocity = state.show_vectors;
         const auto snapshot = dataset.snapshot(
                 scalar_name, state.time_index, state.stride, include_velocity);
         state.dims = {{snapshot.nx, snapshot.ny, snapshot.nz}};
@@ -1313,7 +1344,6 @@ namespace
             ? state.scalar_max + 1.f : state.scalar_max;
         state.scalar_lut->SetTableRange(scalar_range_min, scalar_range_max);
         state.scalar_lut->Build();
-        state.slice_mapper->SetScalarRange(scalar_range_min, scalar_range_max);
 
         const float vector_range_min = state.vector_min == state.vector_max
             ? state.vector_min - 1.f : state.vector_min;
@@ -1323,8 +1353,6 @@ namespace
         state.vector_lut->Build();
         state.vector_mapper->SetScalarRange(vector_range_min, vector_range_max);
         state.stream_mapper->SetScalarRange(vector_range_min, vector_range_max);
-
-        update_slice_extent(state);
 
         double bounds[6] = {0., 1., 0., 1., 0., 1.};
         state.grid->GetBounds(bounds);
@@ -1344,6 +1372,7 @@ namespace
         if (state.reset_camera)
         {
             state.renderer->ResetCamera();
+            zero_camera_roll(state.renderer->GetActiveCamera());
             state.renderer->ResetCameraClippingRange();
             state.reset_camera = false;
         }
@@ -1373,7 +1402,7 @@ namespace
                 const double dy = y - state.orbit.y;
                 camera->Azimuth(-0.35*dx);
                 camera->Elevation(0.35*dy);
-                camera->OrthogonalizeViewUp();
+                zero_camera_roll(camera);
                 state.renderer->ResetCameraClippingRange();
             }
 
@@ -1389,10 +1418,8 @@ namespace
             {
                 double pos[3];
                 double focal[3];
-                double up[3];
                 camera->GetPosition(pos);
                 camera->GetFocalPoint(focal);
-                camera->GetViewUp(up);
 
                 double view_dir[3] = {
                         focal[0] - pos[0],
@@ -1400,11 +1427,17 @@ namespace
                         focal[2] - pos[2]};
                 const double distance = std::max(1.e-6, norm3(view_dir));
                 normalize3(view_dir);
-                normalize3(up);
 
+                const double world_up[3] = {0., 0., 1.};
                 double right[3];
-                cross3(view_dir, up, right);
+                cross3(view_dir, world_up, right);
+                if (norm3(right) < 1.e-8)
+                    right[0] = 1.;
                 normalize3(right);
+
+                double up[3];
+                cross3(right, view_dir, up);
+                normalize3(up);
 
                 const double dx = x - state.pan.x;
                 const double dy = y - state.pan.y;
@@ -1416,6 +1449,7 @@ namespace
 
                 camera->SetPosition(pos[0] + shift[0], pos[1] + shift[1], pos[2] + shift[2]);
                 camera->SetFocalPoint(focal[0] + shift[0], focal[1] + shift[1], focal[2] + shift[2]);
+                zero_camera_roll(camera);
                 state.renderer->ResetCameraClippingRange();
             }
 
@@ -1477,6 +1511,7 @@ namespace
 
         auto* camera = state->renderer->GetActiveCamera();
         camera->Dolly(yoffset > 0. ? 1.12 : 0.88);
+        zero_camera_roll(camera);
         state->renderer->ResetCameraClippingRange();
     }
 
@@ -1490,9 +1525,6 @@ namespace
         state.render_window = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
         state.renderer = vtkSmartPointer<vtkRenderer>::New();
         state.grid = vtkSmartPointer<vtkStructuredGrid>::New();
-        state.slice = vtkSmartPointer<vtkStructuredGridGeometryFilter>::New();
-        state.slice_mapper = vtkSmartPointer<vtkDataSetMapper>::New();
-        state.slice_actor = vtkSmartPointer<vtkActor>::New();
         state.outline = vtkSmartPointer<vtkOutlineFilter>::New();
         state.outline_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
         state.outline_actor = vtkSmartPointer<vtkActor>::New();
@@ -1554,12 +1586,6 @@ namespace
         state.vector_lut->SetValueRange(0.9, 0.95);
         state.vector_lut->Build();
 
-        state.slice->SetInputData(state.grid);
-        state.slice_mapper->SetInputConnection(state.slice->GetOutputPort());
-        state.slice_mapper->SetLookupTable(state.scalar_lut);
-        state.slice_mapper->ScalarVisibilityOn();
-        state.slice_actor->SetMapper(state.slice_mapper);
-
         state.outline->SetInputData(state.grid);
         state.outline_mapper->SetInputConnection(state.outline->GetOutputPort());
         state.outline_actor->SetMapper(state.outline_mapper);
@@ -1599,7 +1625,6 @@ namespace
         state.volume_actor->SetMapper(state.volume_mapper);
         state.volume_actor->SetProperty(state.volume_property);
 
-        state.renderer->AddActor(state.slice_actor);
         state.renderer->AddVolume(state.volume_actor);
         state.renderer->AddActor(state.outline_actor);
         state.renderer->AddActor(state.vector_actor);
@@ -1622,6 +1647,18 @@ namespace
                         state.case_settings.domain_size[0],
                         state.case_settings.domain_size[1],
                         state.case_settings.domain_size[2]);
+            if (state.case_settings.has_grid_size)
+                ImGui::Text(
+                        "grid %.0f x %.0f x %.0f",
+                        state.case_settings.grid_size[0],
+                        state.case_settings.grid_size[1],
+                        state.case_settings.grid_size[2]);
+            if (state.case_settings.has_cell_size)
+                ImGui::Text(
+                        "cell %.6g x %.6g x %.6g m",
+                        state.case_settings.cell_size[0],
+                        state.case_settings.cell_size[1],
+                        state.case_settings.cell_size[2]);
         }
 
         if (ImGui::Button(state.playing ? "Pause" : "Play"))
@@ -1649,22 +1686,22 @@ namespace
             state.needs_dataset_update = true;
         ImGui::SliderFloat("Playback", &state.playback_rate, 1.f, 60.f, "%.0f fps");
 
-        const char* method_labels[] = {
-                "Scalar slice",
-                "Scalar volume",
-                "Velocity glyphs",
-                "Velocity streamlines"};
-        if (ImGui::Combo("Method", &state.method, method_labels, 4))
+        if (ImGui::Checkbox("Show Scalar", &state.show_scalar))
+            update_visibility(state);
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Show Vector", &state.show_vectors))
         {
             state.needs_dataset_update = true;
             update_visibility(state);
         }
 
-        const auto method = current_method(state);
-        const bool scalar_method = method == Visualization_method::Scalar_slice
-                || method == Visualization_method::Scalar_volume;
-        const bool glyph_method = method == Visualization_method::Velocity_glyphs;
-        const bool streamline_method = method == Visualization_method::Velocity_streamlines;
+        const char* vector_mode_labels[] = {"Glyphs", "Streamlines"};
+        if (state.show_vectors && ImGui::Combo("Vector mode", &state.vector_mode, vector_mode_labels, 2))
+            update_visibility(state);
+
+        const auto vector_mode = current_vector_mode(state);
+        const bool glyph_method = state.show_vectors && vector_mode == Vector_mode::Glyphs;
+        const bool streamline_method = state.show_vectors && vector_mode == Vector_mode::Streamlines;
 
         std::vector<const char*> scalar_labels;
         scalar_labels.reserve(state.scalar_names.size());
@@ -1689,18 +1726,7 @@ namespace
             state.reset_camera = true;
         }
 
-        if (method == Visualization_method::Scalar_slice)
-        {
-            const char* axes[] = {"X", "Y", "Z"};
-            if (ImGui::Combo("Slice axis", &state.slice_axis, axes, 3))
-                update_slice_extent(state);
-
-            const int axis_max = std::max(0, state.dims[state.slice_axis]-1);
-            if (ImGui::SliderInt("Slice", &state.slice_index, 0, axis_max))
-                update_slice_extent(state);
-        }
-
-        if (method == Visualization_method::Scalar_volume
+        if (state.show_scalar
                 && ImGui::SliderFloat("Volume opacity", &state.volume_opacity_scale, 0.05f, 8.f))
             update_volume_transfer(state);
 
@@ -1708,7 +1734,8 @@ namespace
         scale_changed |= ImGui::SliderFloat("X scale", &state.display_scale[0], 0.01f, 50.f, "%.2f");
         scale_changed |= ImGui::SliderFloat("Y scale", &state.display_scale[1], 0.01f, 50.f, "%.2f");
         scale_changed |= ImGui::SliderFloat("Z scale", &state.display_scale[2], 0.01f, 50.f, "%.2f");
-        if (state.case_settings.has_domain_size && ImGui::Button("Auto scale"))
+        if ((state.case_settings.has_cell_size || state.case_settings.has_domain_size)
+                && ImGui::Button("Auto scale"))
         {
             state.display_scale = state.case_settings.display_scale;
             scale_changed = true;
@@ -1728,12 +1755,13 @@ namespace
         if (streamline_method && ImGui::SliderInt("Seed stride", &state.streamline_stride, 1, 64))
             state.needs_dataset_update = true;
 
-        if (scalar_method)
+        if (state.show_scalar)
             ImGui::Text("scalar %.6g .. %.6g", state.scalar_min, state.scalar_max);
-        else
+
+        if (state.show_vectors)
             ImGui::Text("speed %.6g .. %.6g", state.vector_min, state.vector_max);
 
-        if (!scalar_method && (!dataset.has_velocity() || !state.vector_data || state.vector_data->GetNumberOfPoints() == 0))
+        if (state.show_vectors && (!dataset.has_velocity() || !state.vector_data || state.vector_data->GetNumberOfPoints() == 0))
             ImGui::Text("velocity unavailable");
 
         ImGui::End();
@@ -1806,6 +1834,9 @@ namespace
     {
         Viz_state state;
         state.scalar_names = dataset.scalar_names();
+        if (const auto it = std::find(state.scalar_names.begin(), state.scalar_names.end(), "ql+qi");
+                it != state.scalar_names.end())
+            state.scalar_index = static_cast<int>(std::distance(state.scalar_names.begin(), it));
         state.case_settings = case_settings;
         if (state.case_settings.has_domain_size)
             state.display_scale = state.case_settings.display_scale;
