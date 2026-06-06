@@ -19,28 +19,6 @@
 #  You should have received a copy of the GNU General Public License
 #  along with MicroHH.  If not, see <http://www.gnu.org/licenses/>.
 #
-include_directories(${INCLUDE_DIRS} "../include" ".")
-
-# retrieve the git hash from the current commit
-find_package(Git)
-if(GIT_EXECUTABLE)
-  execute_process(
-    COMMAND git describe --dirty --tags
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    OUTPUT_VARIABLE GITHASH
-    RESULT_VARIABLE GITRETURN)
-  if(NOT GITRETURN MATCHES 0)
-    set(GITHASH "not available")
-  endif()
-else()
-  set(GITHASH "not available")
-endif()
-
-message(STATUS "Git hash " ${GITHASH})
-
-# send a precompiler statement replacing the git hash
-add_definitions(-DGITHASH="${GITHASH}")
-
 find_package(OpenGL REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
@@ -61,31 +39,24 @@ find_package(VTK CONFIG REQUIRED
     RenderingVolumeOpenGL2)
 
 add_executable(
-  microhh_viz
-  microhh_viz.cxx
-  model_viz.cxx
-  visualization_viz.cxx)
+  microhh_nc_viz
+  netcdf_visualizer.cxx)
 
 target_include_directories(
-  microhh_viz
-  PUBLIC
-    ${INCLUDE_DIRS}
-    "."
-    "../include"
-    "../rte-rrtmgp-cpp/include")
+  microhh_nc_viz
+  PRIVATE
+    ${NETCDF_INCLUDE_DIR}
+    ${NETCDF_INCLUDE_DIRS})
 
-set(MICROHH_VIZ_LIBS
-  ${VTK_LIBRARIES}
-  glfw
-  imgui::imgui
-  OpenGL::GL)
-
-if(USECUDA)
-    target_link_libraries(microhh_viz PRIVATE microhhc CUDA::curand CUDA::cufft rte_rrtmgp rte_rrtmgp_cuda rte_rrtmgp_cuda_rt rte_rrtmgp_kernels rte_rrtmgp_kernels_cuda rte_rrtmgp_kernels_cuda_rt ${LIBS} ${MICROHH_VIZ_LIBS})
-else()
-    target_link_libraries(microhh_viz PRIVATE microhhc rte_rrtmgp_kernels rte_rrtmgp ${LIBS} ${MICROHH_VIZ_LIBS})
-endif()
+target_link_libraries(
+  microhh_nc_viz
+  PRIVATE
+    ${VTK_LIBRARIES}
+    glfw
+    imgui::imgui
+    OpenGL::GL
+    ${NETCDF_LIB_C})
 
 vtk_module_autoinit(
-  TARGETS microhh_viz
+  TARGETS microhh_nc_viz
   MODULES ${VTK_LIBRARIES})
