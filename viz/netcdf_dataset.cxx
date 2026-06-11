@@ -35,10 +35,8 @@
 #include <netcdf.h>
 
 #include <openvdb/openvdb.h>
+#include <openvdb/io/File.h>
 #include <openvdb/math/Transform.h>
-
-#include <nanovdb/io/IO.h>
-#include <nanovdb/tools/CreateNanoGrid.h>
 
 namespace microhh::viz
 {
@@ -560,6 +558,11 @@ bool Dataset::has_velocity() const
     return !impl_->velocity.empty();
 }
 
+bool Dataset::has_q_criterion_velocity() const
+{
+    return impl_->velocity.count("u") && impl_->velocity.count("v") && impl_->velocity.count("w");
+}
+
 bool Dataset::has_total_cloud_density() const
 {
     return impl_->scalars.count("ql") && impl_->scalars.count("qi");
@@ -572,10 +575,12 @@ int Dataset::time_count(const std::string& scalar_name) const
     return static_cast<int>(impl_->scalars.at(scalar_name).nt());
 }
 
-Vdb_export_summary Dataset::export_total_cloud_density_nvdb_sequence(const fs::path& directory) const
+Vdb_export_summary Dataset::export_total_cloud_density_vdb_sequence(const fs::path& directory) const
 {
     if (!has_total_cloud_density())
-        throw std::runtime_error("NanoVDB export requires both ql.nc and qi.nc");
+        throw std::runtime_error("VDB export requires both ql.nc and qi.nc");
+    if (!has_q_criterion_velocity())
+        throw std::runtime_error("VDB export requires u.nc, v.nc, and w.nc");
 
     const auto& ql = impl_->scalars.at("ql");
     const auto& qi = impl_->scalars.at("qi");
@@ -621,17 +626,24 @@ Vdb_export_summary Dataset::export_total_cloud_density_nvdb_sequence(const fs::p
 
     for (std::size_t frame=0; frame<frame_count; ++frame)
     {
-        auto values = ql.read_time_slice(frame);
+        const auto ql_values = ql.read_time_slice(frame);
         const auto qi_values = qi.read_time_slice(frame);
-        if (qi_values.size() != values.size())
+        if (qi_values.size() != ql_values.size())
             throw std::runtime_error("ql and qi frame sizes do not match");
 
-        for (std::size_t id=0; id<values.size(); ++id)
-            values[id] += qi_values[id];
+        const auto u_values = impl_->velocity.at("u").read_time_slice(std::min<std::size_t>(frame, impl_->velocity.at("u").nt() - 1));
+        const auto v_values = impl_->velocity.at("v").read_time_slice(std::min<std::size_t>(frame, impl_->velocity.at("v").nt() - 1));
+        const auto w_values = impl_->velocity.at("w").read_time_slice(std::min<std::size_t>(frame, impl_->velocity.at("w").nt() - 1));
+        if (u_values.size() != ql_values.size() || v_values.size() != ql_values.size() || w_values.size() != ql_values.size())
+            throw std::runtime_error("velocity and density frame sizes do not match");
 
-        auto grid = openvdb::FloatGrid::create(0.f);
-        grid->setName("cloud_density");
-        grid->setGridClass(openvdb::GRID_FOG_VOLUME);
+        auto density_grid = openvdb::FloatGrid::create(0.f);
+        density_grid->setName("cloud_density");
+        density_grid->setGridClass(openvdb::GRID_FOG_VOLUME);
+
+        auto q_grid = openvdb::FloatGrid::create(0.f);
+        q_grid->setName("q_criterion");
+        q_grid->setGridClass(openvdb::GRID_FOG_VOLUME);
 
         auto transform = openvdb::math::Transform::createLinearTransform(1.);
         transform->postScale(openvdb::math::Vec3d(
@@ -642,50 +654,125 @@ Vdb_export_summary Dataset::export_total_cloud_density_nvdb_sequence(const fs::p
                     ql.x.empty() ? 0. : ql.x.front(),
                     ql.y.empty() ? 0. : ql.y.front(),
                     ql.z.empty() ? 0. : ql.z.front()));
-        grid->setTransform(transform);
+        density_grid->setTransform(transform);
+        q_grid->setTransform(transform->copy());
 
-        grid->insertMeta("microhh_source", openvdb::StringMetadata("ql+qi"));
-        grid->insertMeta("microhh_time", openvdb::DoubleMetadata(ql.time_value(frame)));
-        grid->insertMeta("microhh_time_index", openvdb::Int32Metadata(static_cast<std::int32_t>(frame)));
-        grid->insertMeta("microhh_resampled_to_uniform", openvdb::StringMetadata(resample_to_uniform ? "true" : "false"));
+        density_grid->insertMeta("microhh_source", openvdb::StringMetadata("ql+qi"));
+        density_grid->insertMeta("microhh_time", openvdb::DoubleMetadata(ql.time_value(frame)));
+        density_grid->insertMeta("microhh_time_index", openvdb::Int32Metadata(static_cast<std::int32_t>(frame)));
+        density_grid->insertMeta("microhh_resampled_to_uniform", openvdb::StringMetadata(resample_to_uniform ? "true" : "false"));
+        q_grid->insertMeta("microhh_source", openvdb::StringMetadata("q_criterion"));
+        q_grid->insertMeta("microhh_time", openvdb::DoubleMetadata(ql.time_value(frame)));
+        q_grid->insertMeta("microhh_time_index", openvdb::Int32Metadata(static_cast<std::int32_t>(frame)));
+        q_grid->insertMeta("microhh_resampled_to_uniform", openvdb::StringMetadata(resample_to_uniform ? "true" : "false"));
 
-        auto accessor = grid->getAccessor();
+        auto density_accessor = density_grid->getAccessor();
+        auto q_accessor = q_grid->getAccessor();
         std::size_t active_voxels = 0;
         for (int k=0; k<nz; ++k)
             for (int j=0; j<ny; ++j)
                 for (int i=0; i<nx; ++i)
                 {
-                    const float value = resample_to_uniform
+                    const float density = resample_to_uniform
                             ? sample_component(
-                                    values, nx, ny,
+                                    ql_values, nx, ny,
                                     x_samples[static_cast<std::size_t>(i)],
                                     y_samples[static_cast<std::size_t>(j)],
                                     z_samples[static_cast<std::size_t>(k)])
-                            : values[point_id(nx, ny, i, j, k)];
+                            + sample_component(
+                                    qi_values, nx, ny,
+                                    x_samples[static_cast<std::size_t>(i)],
+                                    y_samples[static_cast<std::size_t>(j)],
+                                    z_samples[static_cast<std::size_t>(k)])
+                            : ql_values[point_id(nx, ny, i, j, k)] + qi_values[point_id(nx, ny, i, j, k)];
 
-                    if (value > 0.f)
+                    if (density <= 0.f)
+                        continue;
+
+                    const int im = std::max(0, i - 1);
+                    const int ip = std::min(nx - 1, i + 1);
+                    const int jm = std::max(0, j - 1);
+                    const int jp = std::min(ny - 1, j + 1);
+                    const int km = std::max(0, k - 1);
+                    const int kp = std::min(nz - 1, k + 1);
+
+                    const auto sample_velocity = [&](const std::vector<float>& values, const int ii, const int jj, const int kk)
                     {
-                        accessor.setValue(openvdb::Coord(i, j, k), value);
-                        ++active_voxels;
-                    }
+                        if (resample_to_uniform)
+                            return sample_component(
+                                    values, nx, ny,
+                                    x_samples[static_cast<std::size_t>(ii)],
+                                    y_samples[static_cast<std::size_t>(jj)],
+                                    z_samples[static_cast<std::size_t>(kk)]);
+                        return values[point_id(nx, ny, ii, jj, kk)];
+                    };
+
+                    const auto grid_axis_value = [&](const std::vector<float>& axis, const int idx)
+                    {
+                        if (axis.empty())
+                            return static_cast<double>(idx);
+                        if (resample_to_uniform)
+                            return static_cast<double>(linear_axis_value(axis, idx));
+                        return static_cast<double>(axis[static_cast<std::size_t>(idx)]);
+                    };
+
+                    const auto axis_step = [](const std::vector<float>& axis, const int a, const int b)
+                    {
+                        return std::max(1.e-12, std::abs(static_cast<double>(axis[static_cast<std::size_t>(a)]
+                                - axis[static_cast<std::size_t>(b)])));
+                    };
+
+                    const double dx = std::max(1.e-12, std::abs(grid_axis_value(ql.x, ip) - grid_axis_value(ql.x, im)));
+                    const double dy = std::max(1.e-12, std::abs(grid_axis_value(ql.y, jp) - grid_axis_value(ql.y, jm)));
+                    const double dz = std::max(1.e-12, std::abs(grid_axis_value(ql.z, kp) - grid_axis_value(ql.z, km)));
+
+                    const double du_dx = (ip == im) ? 0. : (sample_velocity(u_values, ip, j, k) - sample_velocity(u_values, im, j, k)) / dx;
+                    const double du_dy = (jp == jm) ? 0. : (sample_velocity(u_values, i, jp, k) - sample_velocity(u_values, i, jm, k)) / dy;
+                    const double du_dz = (kp == km) ? 0. : (sample_velocity(u_values, i, j, kp) - sample_velocity(u_values, i, j, km)) / dz;
+
+                    const double dv_dx = (ip == im) ? 0. : (sample_velocity(v_values, ip, j, k) - sample_velocity(v_values, im, j, k)) / dx;
+                    const double dv_dy = (jp == jm) ? 0. : (sample_velocity(v_values, i, jp, k) - sample_velocity(v_values, i, jm, k)) / dy;
+                    const double dv_dz = (kp == km) ? 0. : (sample_velocity(v_values, i, j, kp) - sample_velocity(v_values, i, j, km)) / dz;
+
+                    const double dw_dx = (ip == im) ? 0. : (sample_velocity(w_values, ip, j, k) - sample_velocity(w_values, im, j, k)) / dx;
+                    const double dw_dy = (jp == jm) ? 0. : (sample_velocity(w_values, i, jp, k) - sample_velocity(w_values, i, jm, k)) / dy;
+                    const double dw_dz = (kp == km) ? 0. : (sample_velocity(w_values, i, j, kp) - sample_velocity(w_values, i, j, km)) / dz;
+
+                    const double s00 = du_dx;
+                    const double s11 = dv_dy;
+                    const double s22 = dw_dz;
+                    const double s01 = 0.5 * (du_dy + dv_dx);
+                    const double s02 = 0.5 * (du_dz + dw_dx);
+                    const double s12 = 0.5 * (dv_dz + dw_dy);
+                    const double w01 = 0.5 * (du_dy - dv_dx);
+                    const double w02 = 0.5 * (du_dz - dw_dx);
+                    const double w12 = 0.5 * (dv_dz - dw_dy);
+                    const double s_norm_sq = s00*s00 + s11*s11 + s22*s22
+                            + 2.0 * (s01*s01 + s02*s02 + s12*s12);
+                    const double w_norm_sq = 2.0 * (w01*w01 + w02*w02 + w12*w12);
+                    const float q_value = static_cast<float>(w_norm_sq - s_norm_sq);
+
+                    const openvdb::Coord coord(i, j, k);
+                    density_accessor.setValueOn(coord, density);
+                    q_accessor.setValueOn(coord, q_value);
+                    ++active_voxels;
                 }
 
-        grid->insertMeta("microhh_active_voxels", openvdb::Int64Metadata(static_cast<std::int64_t>(active_voxels)));
-        grid->tree().prune();
+        density_grid->insertMeta("microhh_active_voxels", openvdb::Int64Metadata(static_cast<std::int64_t>(active_voxels)));
+        q_grid->insertMeta("microhh_active_voxels", openvdb::Int64Metadata(static_cast<std::int64_t>(active_voxels)));
+        density_grid->tree().prune();
+        q_grid->tree().prune();
 
         std::ostringstream filename;
         filename << "cloud_density_"
             << std::setw(6) << std::setfill('0') << frame
-            << ".nvdb";
+            << ".vdb";
 
-        const auto handle = nanovdb::tools::openToNanoVDB(
-                openvdb::GridBase::Ptr(grid),
-                nanovdb::tools::StatsMode::All,
-                nanovdb::CheckMode::Full);
-        nanovdb::io::writeGrid(
-                (directory / filename.str()).string(),
-                handle,
-                nanovdb::io::Codec::BLOSC);
+        openvdb::GridPtrVec grids;
+        grids.push_back(density_grid);
+        grids.push_back(q_grid);
+        openvdb::io::File file((directory / filename.str()).string());
+        file.write(grids);
 
         summary.active_voxels += active_voxels;
     }

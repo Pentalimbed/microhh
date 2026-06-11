@@ -186,9 +186,10 @@ namespace microhh::viz
 
             const std::vector<std::string>& scalar_names() const;
             bool has_velocity() const;
+            bool has_q_criterion_velocity() const;
             bool has_total_cloud_density() const;
             int time_count(const std::string& scalar_name) const;
-            Vdb_export_summary export_total_cloud_density_nvdb_sequence(const fs::path& directory) const;
+            Vdb_export_summary export_total_cloud_density_vdb_sequence(const fs::path& directory) const;
             Snapshot snapshot(
                     const std::string& scalar_name,
                     int time_index,

@@ -1024,17 +1024,17 @@ void render_gui(Viz_state& state, const Dataset& dataset)
 
     ImGui::Separator();
     if (!state.export_directory.empty())
-        ImGui::TextWrapped("NanoVDB dir %s", state.export_directory.string().c_str());
+        ImGui::TextWrapped("VDB dir %s", state.export_directory.string().c_str());
 
-    const bool can_export_nvdb = dataset.has_total_cloud_density();
-    if (!can_export_nvdb)
+    const bool can_export_vdb = dataset.has_total_cloud_density() && dataset.has_q_criterion_velocity();
+    if (!can_export_vdb)
         ImGui::BeginDisabled();
 
-    if (ImGui::Button("Export cloud NanoVDB sequence"))
+    if (ImGui::Button("Export cloud VDB sequence"))
     {
         try
         {
-            const auto summary = dataset.export_total_cloud_density_nvdb_sequence(state.export_directory);
+            const auto summary = dataset.export_total_cloud_density_vdb_sequence(state.export_directory);
             std::ostringstream message;
             message << "exported " << summary.frames << " frames";
             if (summary.resampled)
@@ -1050,7 +1050,7 @@ void render_gui(Viz_state& state, const Dataset& dataset)
         }
     }
 
-    if (!can_export_nvdb)
+    if (!can_export_vdb)
         ImGui::EndDisabled();
 
     if (!state.export_message.empty())
@@ -1076,7 +1076,7 @@ void run_visualizer(
             it != state.scalar_names.end())
         state.scalar_index = static_cast<int>(std::distance(state.scalar_names.begin(), it));
     state.case_settings = case_settings;
-    state.export_directory = (source_directory.empty() ? fs::current_path() : source_directory) / "nvdb";
+    state.export_directory = (source_directory.empty() ? fs::current_path() : source_directory) / "vdb";
     if (state.case_settings.has_domain_size)
         state.display_scale = state.case_settings.display_scale;
 

@@ -22,8 +22,7 @@
 find_package(OpenGL REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
-find_package(Blosc REQUIRED)
-find_package(OpenVDB REQUIRED COMPONENTS openvdb nanovdb)
+find_package(OpenVDB REQUIRED)
 find_package(VTK CONFIG REQUIRED
   COMPONENTS
     CommonCore
@@ -46,12 +45,6 @@ add_executable(
   netcdf_dataset.cxx
   netcdf_viewer.cxx)
 
-target_compile_definitions(
-  microhh_nc_viz
-  PRIVATE
-    NANOVDB_USE_OPENVDB
-    NANOVDB_USE_BLOSC)
-
 target_include_directories(
   microhh_nc_viz
   PRIVATE
@@ -65,7 +58,6 @@ target_link_libraries(
     glfw
     imgui::imgui
     OpenVDB::openvdb
-    ${Blosc_LIBRARIES}
     OpenGL::GL
     ${NETCDF_LIB_C})
 
