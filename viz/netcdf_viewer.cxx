@@ -1026,17 +1026,17 @@ void render_gui(Viz_state& state, const Dataset& dataset)
     if (!state.export_directory.empty())
         ImGui::TextWrapped("VDB dir %s", state.export_directory.string().c_str());
 
-    const bool can_export_vdb = dataset.has_total_cloud_density() && dataset.has_q_criterion_velocity();
+    const bool can_export_vdb = dataset.has_cloud_velocity_fields();
     if (!can_export_vdb)
         ImGui::BeginDisabled();
 
-    if (ImGui::Button("Export cloud VDB sequence"))
+    if (ImGui::Button("Export cloud + velocity VDB"))
     {
         try
         {
-            const auto summary = dataset.export_total_cloud_density_vdb_sequence(state.export_directory);
+            const auto summary = dataset.export_cloud_velocity_vdb_sequence(state.export_directory);
             std::ostringstream message;
-            message << "exported " << summary.frames << " frames";
+            message << "exported " << summary.frames << " frames of ql, qi, and masked u/v/w";
             if (summary.resampled)
                 message << " (resampled)";
             message << " to " << state.export_directory.string();

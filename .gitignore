@@ -5,3 +5,5 @@
 build/
 config/default.cmake
 .cache
+
+export/

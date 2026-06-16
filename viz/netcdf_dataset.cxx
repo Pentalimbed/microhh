@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -392,6 +393,45 @@ namespace
 
         return true;
     }
+
+    std::vector<float> export_axis_values(
+            const std::vector<float>& source_axis,
+            const int count,
+            const bool resampled_to_uniform)
+    {
+        std::vector<float> values;
+        values.reserve(static_cast<std::size_t>(count));
+        for (int i=0; i<count; ++i)
+        {
+            if (resampled_to_uniform)
+                values.push_back(linear_axis_value(source_axis, i));
+            else if (!source_axis.empty())
+                values.push_back(source_axis[static_cast<std::size_t>(i)]);
+            else
+                values.push_back(static_cast<float>(i));
+        }
+        return values;
+    }
+
+    openvdb::FloatGrid::Ptr make_float_grid(
+            const std::string& name,
+            const std::string& source,
+            const openvdb::math::Transform::Ptr& transform,
+            const double time,
+            const std::size_t frame,
+            const bool resampled_to_uniform,
+            const openvdb::GridClass grid_class)
+    {
+        auto grid = openvdb::FloatGrid::create(0.f);
+        grid->setName(name);
+        grid->setGridClass(grid_class);
+        grid->setTransform(transform->copy());
+        grid->insertMeta("microhh_source", openvdb::StringMetadata(source));
+        grid->insertMeta("microhh_time", openvdb::DoubleMetadata(time));
+        grid->insertMeta("microhh_time_index", openvdb::Int32Metadata(static_cast<std::int32_t>(frame)));
+        grid->insertMeta("microhh_resampled_to_uniform", openvdb::StringMetadata(resampled_to_uniform ? "true" : "false"));
+        return grid;
+    }
 }
 
 Case_settings read_case_settings(const fs::path& directory)
@@ -558,14 +598,13 @@ bool Dataset::has_velocity() const
     return !impl_->velocity.empty();
 }
 
-bool Dataset::has_q_criterion_velocity() const
+bool Dataset::has_cloud_velocity_fields() const
 {
-    return impl_->velocity.count("u") && impl_->velocity.count("v") && impl_->velocity.count("w");
-}
-
-bool Dataset::has_total_cloud_density() const
-{
-    return impl_->scalars.count("ql") && impl_->scalars.count("qi");
+    return impl_->scalars.count("ql")
+            && impl_->scalars.count("qi")
+            && impl_->velocity.count("u")
+            && impl_->velocity.count("v")
+            && impl_->velocity.count("w");
 }
 
 int Dataset::time_count(const std::string& scalar_name) const
@@ -575,12 +614,10 @@ int Dataset::time_count(const std::string& scalar_name) const
     return static_cast<int>(impl_->scalars.at(scalar_name).nt());
 }
 
-Vdb_export_summary Dataset::export_total_cloud_density_vdb_sequence(const fs::path& directory) const
+Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(const fs::path& directory) const
 {
-    if (!has_total_cloud_density())
-        throw std::runtime_error("VDB export requires both ql.nc and qi.nc");
-    if (!has_q_criterion_velocity())
-        throw std::runtime_error("VDB export requires u.nc, v.nc, and w.nc");
+    if (!has_cloud_velocity_fields())
+        throw std::runtime_error("VDB export requires ql.nc, qi.nc, u.nc, v.nc, and w.nc");
 
     const auto& ql = impl_->scalars.at("ql");
     const auto& qi = impl_->scalars.at("qi");
@@ -594,6 +631,14 @@ Vdb_export_summary Dataset::export_total_cloud_density_vdb_sequence(const fs::pa
     const std::size_t frame_count = std::min(ql.nt(), qi.nt());
     if (frame_count == 0)
         throw std::runtime_error("No ql/qi frames are available for VDB export");
+
+    struct Velocity_export_sampler
+    {
+        const Field_file* field = nullptr;
+        std::vector<Axis_sample> x;
+        std::vector<Axis_sample> y;
+        std::vector<Axis_sample> z;
+    };
 
     fs::create_directories(directory);
 
@@ -620,6 +665,23 @@ Vdb_export_summary Dataset::export_total_cloud_density_vdb_sequence(const fs::pa
             z_samples.push_back(locate_axis_sample(ql.z, linear_axis_value(ql.z, k)));
     }
 
+    const auto export_x = export_axis_values(ql.x, nx, resample_to_uniform);
+    const auto export_y = export_axis_values(ql.y, ny, resample_to_uniform);
+    const auto export_z = export_axis_values(ql.z, nz, resample_to_uniform);
+
+    std::map<std::string, Velocity_export_sampler> velocity_samplers;
+    for (const auto& name : {"u", "v", "w"})
+    {
+        const auto& field = impl_->velocity.at(name);
+        velocity_samplers.emplace(
+                name,
+                Velocity_export_sampler{
+                    &field,
+                    map_axis_samples(export_x, field.x),
+                    map_axis_samples(export_y, field.y),
+                    map_axis_samples(export_z, field.z)});
+    }
+
     Vdb_export_summary summary;
     summary.frames = frame_count;
     summary.resampled = resample_to_uniform;
@@ -631,19 +693,16 @@ Vdb_export_summary Dataset::export_total_cloud_density_vdb_sequence(const fs::pa
         if (qi_values.size() != ql_values.size())
             throw std::runtime_error("ql and qi frame sizes do not match");
 
-        const auto u_values = impl_->velocity.at("u").read_time_slice(std::min<std::size_t>(frame, impl_->velocity.at("u").nt() - 1));
-        const auto v_values = impl_->velocity.at("v").read_time_slice(std::min<std::size_t>(frame, impl_->velocity.at("v").nt() - 1));
-        const auto w_values = impl_->velocity.at("w").read_time_slice(std::min<std::size_t>(frame, impl_->velocity.at("w").nt() - 1));
-        if (u_values.size() != ql_values.size() || v_values.size() != ql_values.size() || w_values.size() != ql_values.size())
-            throw std::runtime_error("velocity and density frame sizes do not match");
-
-        auto density_grid = openvdb::FloatGrid::create(0.f);
-        density_grid->setName("cloud_density");
-        density_grid->setGridClass(openvdb::GRID_FOG_VOLUME);
-
-        auto q_grid = openvdb::FloatGrid::create(0.f);
-        q_grid->setName("q_criterion");
-        q_grid->setGridClass(openvdb::GRID_FOG_VOLUME);
+        std::map<std::string, std::vector<float>> velocity_values;
+        for (const auto& [name, sampler] : velocity_samplers)
+        {
+            const auto velocity_frame = std::min<std::size_t>(frame, sampler.field->nt() - 1);
+            auto values = sampler.field->read_time_slice(velocity_frame);
+            const std::size_t expected_size = sampler.field->nx() * sampler.field->ny() * sampler.field->nz();
+            if (values.size() != expected_size)
+                throw std::runtime_error(name + " frame size does not match its dimensions");
+            velocity_values.emplace(name, std::move(values));
+        }
 
         auto transform = openvdb::math::Transform::createLinearTransform(1.);
         transform->postScale(openvdb::math::Vec3d(
@@ -654,123 +713,92 @@ Vdb_export_summary Dataset::export_total_cloud_density_vdb_sequence(const fs::pa
                     ql.x.empty() ? 0. : ql.x.front(),
                     ql.y.empty() ? 0. : ql.y.front(),
                     ql.z.empty() ? 0. : ql.z.front()));
-        density_grid->setTransform(transform);
-        q_grid->setTransform(transform->copy());
 
-        density_grid->insertMeta("microhh_source", openvdb::StringMetadata("ql+qi"));
-        density_grid->insertMeta("microhh_time", openvdb::DoubleMetadata(ql.time_value(frame)));
-        density_grid->insertMeta("microhh_time_index", openvdb::Int32Metadata(static_cast<std::int32_t>(frame)));
-        density_grid->insertMeta("microhh_resampled_to_uniform", openvdb::StringMetadata(resample_to_uniform ? "true" : "false"));
-        q_grid->insertMeta("microhh_source", openvdb::StringMetadata("q_criterion"));
-        q_grid->insertMeta("microhh_time", openvdb::DoubleMetadata(ql.time_value(frame)));
-        q_grid->insertMeta("microhh_time_index", openvdb::Int32Metadata(static_cast<std::int32_t>(frame)));
-        q_grid->insertMeta("microhh_resampled_to_uniform", openvdb::StringMetadata(resample_to_uniform ? "true" : "false"));
+        auto ql_grid = make_float_grid(
+                "ql", "ql", transform, ql.time_value(frame), frame,
+                resample_to_uniform, openvdb::GRID_FOG_VOLUME);
+        auto qi_grid = make_float_grid(
+                "qi", "qi", transform, ql.time_value(frame), frame,
+                resample_to_uniform, openvdb::GRID_FOG_VOLUME);
+        auto u_grid = make_float_grid(
+                "u", "u", transform, ql.time_value(frame), frame,
+                resample_to_uniform, openvdb::GRID_UNKNOWN);
+        auto v_grid = make_float_grid(
+                "v", "v", transform, ql.time_value(frame), frame,
+                resample_to_uniform, openvdb::GRID_UNKNOWN);
+        auto w_grid = make_float_grid(
+                "w", "w", transform, ql.time_value(frame), frame,
+                resample_to_uniform, openvdb::GRID_UNKNOWN);
 
-        auto density_accessor = density_grid->getAccessor();
-        auto q_accessor = q_grid->getAccessor();
+        auto ql_accessor = ql_grid->getAccessor();
+        auto qi_accessor = qi_grid->getAccessor();
+        auto u_accessor = u_grid->getAccessor();
+        auto v_accessor = v_grid->getAccessor();
+        auto w_accessor = w_grid->getAccessor();
         std::size_t active_voxels = 0;
+
+        const auto sample_scalar = [&](const std::vector<float>& values, const int i, const int j, const int k)
+        {
+            if (resample_to_uniform)
+                return sample_component(
+                        values, nx, ny,
+                        x_samples[static_cast<std::size_t>(i)],
+                        y_samples[static_cast<std::size_t>(j)],
+                        z_samples[static_cast<std::size_t>(k)]);
+            return values[point_id(nx, ny, i, j, k)];
+        };
+
+        const auto sample_velocity = [&](const std::string& name, const int i, const int j, const int k)
+        {
+            const auto& sampler = velocity_samplers.at(name);
+            return sample_component(
+                    velocity_values.at(name),
+                    static_cast<int>(sampler.field->nx()),
+                    static_cast<int>(sampler.field->ny()),
+                    sampler.x[static_cast<std::size_t>(i)],
+                    sampler.y[static_cast<std::size_t>(j)],
+                    sampler.z[static_cast<std::size_t>(k)]);
+        };
+
         for (int k=0; k<nz; ++k)
             for (int j=0; j<ny; ++j)
                 for (int i=0; i<nx; ++i)
                 {
-                    const float density = resample_to_uniform
-                            ? sample_component(
-                                    ql_values, nx, ny,
-                                    x_samples[static_cast<std::size_t>(i)],
-                                    y_samples[static_cast<std::size_t>(j)],
-                                    z_samples[static_cast<std::size_t>(k)])
-                            + sample_component(
-                                    qi_values, nx, ny,
-                                    x_samples[static_cast<std::size_t>(i)],
-                                    y_samples[static_cast<std::size_t>(j)],
-                                    z_samples[static_cast<std::size_t>(k)])
-                            : ql_values[point_id(nx, ny, i, j, k)] + qi_values[point_id(nx, ny, i, j, k)];
+                    const float ql_value = sample_scalar(ql_values, i, j, k);
+                    const float qi_value = sample_scalar(qi_values, i, j, k);
+                    const openvdb::Coord coord(i, j, k);
 
-                    if (density <= 0.f)
+                    if (ql_value != 0.f)
+                        ql_accessor.setValueOn(coord, ql_value);
+                    if (qi_value != 0.f)
+                        qi_accessor.setValueOn(coord, qi_value);
+
+                    if (ql_value == 0.f && qi_value == 0.f)
                         continue;
 
-                    const int im = std::max(0, i - 1);
-                    const int ip = std::min(nx - 1, i + 1);
-                    const int jm = std::max(0, j - 1);
-                    const int jp = std::min(ny - 1, j + 1);
-                    const int km = std::max(0, k - 1);
-                    const int kp = std::min(nz - 1, k + 1);
-
-                    const auto sample_velocity = [&](const std::vector<float>& values, const int ii, const int jj, const int kk)
-                    {
-                        if (resample_to_uniform)
-                            return sample_component(
-                                    values, nx, ny,
-                                    x_samples[static_cast<std::size_t>(ii)],
-                                    y_samples[static_cast<std::size_t>(jj)],
-                                    z_samples[static_cast<std::size_t>(kk)]);
-                        return values[point_id(nx, ny, ii, jj, kk)];
-                    };
-
-                    const auto grid_axis_value = [&](const std::vector<float>& axis, const int idx)
-                    {
-                        if (axis.empty())
-                            return static_cast<double>(idx);
-                        if (resample_to_uniform)
-                            return static_cast<double>(linear_axis_value(axis, idx));
-                        return static_cast<double>(axis[static_cast<std::size_t>(idx)]);
-                    };
-
-                    const auto axis_step = [](const std::vector<float>& axis, const int a, const int b)
-                    {
-                        return std::max(1.e-12, std::abs(static_cast<double>(axis[static_cast<std::size_t>(a)]
-                                - axis[static_cast<std::size_t>(b)])));
-                    };
-
-                    const double dx = std::max(1.e-12, std::abs(grid_axis_value(ql.x, ip) - grid_axis_value(ql.x, im)));
-                    const double dy = std::max(1.e-12, std::abs(grid_axis_value(ql.y, jp) - grid_axis_value(ql.y, jm)));
-                    const double dz = std::max(1.e-12, std::abs(grid_axis_value(ql.z, kp) - grid_axis_value(ql.z, km)));
-
-                    const double du_dx = (ip == im) ? 0. : (sample_velocity(u_values, ip, j, k) - sample_velocity(u_values, im, j, k)) / dx;
-                    const double du_dy = (jp == jm) ? 0. : (sample_velocity(u_values, i, jp, k) - sample_velocity(u_values, i, jm, k)) / dy;
-                    const double du_dz = (kp == km) ? 0. : (sample_velocity(u_values, i, j, kp) - sample_velocity(u_values, i, j, km)) / dz;
-
-                    const double dv_dx = (ip == im) ? 0. : (sample_velocity(v_values, ip, j, k) - sample_velocity(v_values, im, j, k)) / dx;
-                    const double dv_dy = (jp == jm) ? 0. : (sample_velocity(v_values, i, jp, k) - sample_velocity(v_values, i, jm, k)) / dy;
-                    const double dv_dz = (kp == km) ? 0. : (sample_velocity(v_values, i, j, kp) - sample_velocity(v_values, i, j, km)) / dz;
-
-                    const double dw_dx = (ip == im) ? 0. : (sample_velocity(w_values, ip, j, k) - sample_velocity(w_values, im, j, k)) / dx;
-                    const double dw_dy = (jp == jm) ? 0. : (sample_velocity(w_values, i, jp, k) - sample_velocity(w_values, i, jm, k)) / dy;
-                    const double dw_dz = (kp == km) ? 0. : (sample_velocity(w_values, i, j, kp) - sample_velocity(w_values, i, j, km)) / dz;
-
-                    const double s00 = du_dx;
-                    const double s11 = dv_dy;
-                    const double s22 = dw_dz;
-                    const double s01 = 0.5 * (du_dy + dv_dx);
-                    const double s02 = 0.5 * (du_dz + dw_dx);
-                    const double s12 = 0.5 * (dv_dz + dw_dy);
-                    const double w01 = 0.5 * (du_dy - dv_dx);
-                    const double w02 = 0.5 * (du_dz - dw_dx);
-                    const double w12 = 0.5 * (dv_dz - dw_dy);
-                    const double s_norm_sq = s00*s00 + s11*s11 + s22*s22
-                            + 2.0 * (s01*s01 + s02*s02 + s12*s12);
-                    const double w_norm_sq = 2.0 * (w01*w01 + w02*w02 + w12*w12);
-                    const float q_value = static_cast<float>(w_norm_sq - s_norm_sq);
-
-                    const openvdb::Coord coord(i, j, k);
-                    density_accessor.setValueOn(coord, density);
-                    q_accessor.setValueOn(coord, q_value);
+                    u_accessor.setValueOn(coord, sample_velocity("u", i, j, k));
+                    v_accessor.setValueOn(coord, sample_velocity("v", i, j, k));
+                    w_accessor.setValueOn(coord, sample_velocity("w", i, j, k));
                     ++active_voxels;
                 }
 
-        density_grid->insertMeta("microhh_active_voxels", openvdb::Int64Metadata(static_cast<std::int64_t>(active_voxels)));
-        q_grid->insertMeta("microhh_active_voxels", openvdb::Int64Metadata(static_cast<std::int64_t>(active_voxels)));
-        density_grid->tree().prune();
-        q_grid->tree().prune();
+        for (auto& grid : {ql_grid, qi_grid, u_grid, v_grid, w_grid})
+        {
+            grid->insertMeta("microhh_active_cloud_voxels", openvdb::Int64Metadata(static_cast<std::int64_t>(active_voxels)));
+            grid->tree().prune();
+        }
 
         std::ostringstream filename;
-        filename << "cloud_density_"
+        filename << "cloud_fields_"
             << std::setw(6) << std::setfill('0') << frame
             << ".vdb";
 
         openvdb::GridPtrVec grids;
-        grids.push_back(density_grid);
-        grids.push_back(q_grid);
+        grids.push_back(ql_grid);
+        grids.push_back(qi_grid);
+        grids.push_back(u_grid);
+        grids.push_back(v_grid);
+        grids.push_back(w_grid);
         openvdb::io::File file((directory / filename.str()).string());
         file.write(grids);
 

@@ -531,8 +531,8 @@ if __name__ == '__main__':
     use_rt = False               # False = 2stream solver for shortwave down, True = raytracer.
     use_homogeneous_z0 = True    # False = checkerboard pattern roughness lengths.
     use_homogeneous_ls = True    # False = checkerboard pattern (some...) land-surface fields.
-    use_aerosols = True          # False = no aerosols in RRTMGP.
-    use_tdep_aerosols = True     # False = time fixed RRTMGP aerosol in domain and background.
+    use_aerosols = False         # False = no aerosols in RRTMGP.
+    use_tdep_aerosols = False    # False = time fixed RRTMGP aerosol in domain and background.
     use_tdep_gasses = False      # False = time fixed ERA5 (o3) and CAMS (co2, ch4) gasses.
     use_tdep_background = False  # False = time fixed RRTMGP T/h2o/o3 background profiles.
 
@@ -556,11 +556,11 @@ if __name__ == '__main__':
     zsize = 4000
     ktot = 200
 
-    itot = 500
-    jtot = 500
+    itot = 300
+    jtot = 300
 
-    xsize = 10000
-    ysize = 10000
+    xsize = 6000
+    ysize = 6000
 
     # Create input files.
     create_case_input(
