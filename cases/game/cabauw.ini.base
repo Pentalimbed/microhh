@@ -20,7 +20,7 @@ lon=4.927
 swspatialorder=2
 
 [advec]
-swadvec=4
+swadvec=2i4
 cflmax=1.0
 fluxlimit_list=None
 
