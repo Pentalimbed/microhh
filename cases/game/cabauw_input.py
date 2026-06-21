@@ -68,7 +68,10 @@ def create_case_input(
     # Remove top level ERA5 to stay within RRTMGP radiation bounds,
     # select requested time period, and interpolate to LES levels.
     ls2d = ls2d.sel(lay=slice(0,135), lev=slice(0,136), time=slice(start_date, end_date))
-    ls2d_z = ls2d.interp(z=z)
+    # NOTE: extrapolate so that LES levels below the lowest source level
+    # (e.g. z=5 m when dz/2 < data zmin=10 m for ktot>=200) get finite values
+    # instead of NaN, which would otherwise blow up the simulation.
+    ls2d_z = ls2d.interp(z=z, kwargs={'fill_value': 'extrapolate'})
 
     # Subtract start time.
     ls2d_z['time_sec'] = ls2d_z['time_sec'] - ls2d_z['time_sec'][0]
@@ -82,7 +85,7 @@ def create_case_input(
 
     # Interpolate to LES levels and ERA5 time (CAMS is 3-hourly).
     cams = cams.interp(time=ls2d.time)
-    cams_z = cams.interp(z=z)
+    cams_z = cams.interp(z=z, kwargs={'fill_value': 'extrapolate'})
 
     # interpolate background CAMS profile to ERA5 levels (CAMS data comes at fewer levels)
     cams_era_layers = xr.Dataset(
@@ -553,14 +556,14 @@ if __name__ == '__main__':
     end_date   = datetime(year=2014, month=11, day=15, hour=18)
 
     # Simple equidistant grid.
-    zsize = 4000
-    ktot = 200
+    zsize = 3000
+    ktot = 300
 
-    itot = 300
-    jtot = 300
+    itot = 400
+    jtot = 400
 
-    xsize = 6000
-    ysize = 6000
+    xsize = 4000
+    ysize = 4000
 
     # Create input files.
     create_case_input(

@@ -21,7 +21,7 @@ swspatialorder=2
 
 [advec]
 swadvec=2i4
-cflmax=1.0
+cflmax=1.4
 fluxlimit_list=None
 
 [diff]
