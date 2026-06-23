@@ -127,7 +127,7 @@ starttime=0
 endtime=None
 dt=6.0
 dtmax=60.0
-savetime=3600
+savetime=1800
 outputiter=20
 adaptivestep=true
 rkorder=4
@@ -152,8 +152,8 @@ coordinates[y]=None
 
 [dump]
 swdump=1
-sampletime=900
-dumplist=ql,qi,u,v,w
+sampletime=1800
+dumplist=ql,qi
 
 [limiter]
 limitlist=None

@@ -551,19 +551,18 @@ if __name__ == '__main__':
     gpt_set = '128_112' # or '256_224'
 
     # Time period.
-    # NOTE: Included ERA5/CAMS data is limited to 2016-08-15 06:00 - 18:00 UTC.
     start_date = datetime(year=2014, month=11, day=15, hour=6)
     end_date   = datetime(year=2014, month=11, day=15, hour=18)
 
     # Simple equidistant grid.
-    zsize = 3000
-    ktot = 300
+    zsize = 6000
+    ktot = 240
 
     itot = 400
     jtot = 400
 
-    xsize = 4000
-    ysize = 4000
+    xsize = 20000
+    ysize = 20000
 
     # Create input files.
     create_case_input(
