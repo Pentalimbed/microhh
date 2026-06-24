@@ -2,3 +2,7 @@
 .code-workspace.code-workspace
 .gitignore
 .vscode
+
+build/
+config/default.cmake
+.venv/
