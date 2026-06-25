@@ -21,6 +21,7 @@
  */
 
 #include <cstdio>
+#include <cmath>
 #include "grid.h"
 #include "fields.h"
 #include "thermo_moist.h"
@@ -175,6 +176,36 @@ namespace
     }
 
     template<typename TF> __global__
+    void calc_buoyancy_tend_2nd_3d_g(TF* __restrict__ wt, TF* __restrict__ th, TF* __restrict__ qt,
+                                  TF* __restrict__ thvrefh, TF* __restrict__ ph,
+                                  int istart, int jstart, int kstart,
+                                  int iend,   int jend,   int kend,
+                                  int jj, int kk)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart;
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const int ijk = i + j*jj + k*kk;
+
+            // Half level temperature and moisture content
+            const TF thh = static_cast<TF>(0.5) * (th[ijk-kk] + th[ijk]);
+            const TF qth = static_cast<TF>(0.5) * (qt[ijk-kk] + qt[ijk]);
+            const TF exnh = exner(ph[ijk]);
+
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, ph[ijk], exnh);
+
+            // Calculate tendency.
+            if (ssa.ql + ssa.qi > 0)
+                wt[ijk] += buoyancy(exnh, thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
+            else
+                wt[ijk] += buoyancy_no_ql(thh, qth, thvrefh[k]);
+        }
+    }
+
+    template<typename TF, bool swphydro_3d> __global__
     void calc_buoyancy_g(TF* __restrict__ b,  TF* __restrict__ th,
                          TF* __restrict__ qt, TF* __restrict__ thvref,
                          TF* __restrict__ p,  TF* __restrict__ exn,
@@ -195,16 +226,18 @@ namespace
         {
             const int ijk = i + j*jj + k*kk;
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]);
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF exn_loc = swphydro_3d ? exner(p_loc) : exn[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc);
 
             if (ssa.ql + ssa.qi > 0)
-                b[ijk] = buoyancy(exn[k], th[ijk], qt[ijk], ssa.ql, ssa.qi, thvref[k]);
+                b[ijk] = buoyancy(exn_loc, th[ijk], qt[ijk], ssa.ql, ssa.qi, thvref[k]);
             else
                 b[ijk] = buoyancy_no_ql(th[ijk], qt[ijk], thvref[k]);
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_buoyancy_h_g(TF* __restrict__ bh,  TF* __restrict__ th,
                          TF* __restrict__ qt, TF* __restrict__ thvrefh,
                          TF* __restrict__ ph,  TF* __restrict__ exnh,
@@ -225,13 +258,15 @@ namespace
             const TF thh = static_cast<TF>(0.5) * (th[ijk-kk] + th[ijk]); // Half level liq. water pot. temp.
             const TF qth = static_cast<TF>(0.5) * (qt[ijk-kk] + qt[ijk]); // Half level specific hum.
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, ph[k], exnh[k]);
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+            const TF exnh_loc = swphydro_3d ? exner(ph_loc) : exnh[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, ph_loc, exnh_loc);
 
             // Calculate tendency
             if (ssa.ql + ssa.qi > 0)
-                bh[ijk] += buoyancy(exnh[k], thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
+                bh[ijk] = buoyancy(exnh_loc, thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
             else
-                bh[ijk] += buoyancy_no_ql(thh, qth, thvrefh[k]);
+                bh[ijk] = buoyancy_no_ql(thh, qth, thvrefh[k]);
         }
     }
 
@@ -313,7 +348,7 @@ namespace
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_liquid_water_g(TF* __restrict__ ql, TF* __restrict__ th, TF* __restrict__ qt,
                              TF* __restrict__ exn, TF* __restrict__ p,
                              int istart, int jstart, int kstart,
@@ -327,11 +362,13 @@ namespace
         if (i < iend && j < jend && k < kend)
         {
             const int ijk = i + j*jj + k*kk;
-            ql[ijk] = sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]).ql;
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF exn_loc = swphydro_3d ? exner(p_loc) : exn[k];
+            ql[ijk] = sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc).ql;
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_liquid_and_ice_g(
             TF* __restrict__ qlqi,
             TF* __restrict__ thl,
@@ -350,12 +387,14 @@ namespace
         {
             const int ijk = i + j*jj + k*kk;
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exn[k]);
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF exn_loc = swphydro_3d ? exner(p_loc) : exn[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
             qlqi[ijk] = ssa.ql + ssa.qi;
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_liquid_water_h_g(TF* __restrict__ qlh, TF* __restrict__ th, TF* __restrict__ qt,
                              TF* __restrict__ exnh, TF* __restrict__ ph,
                              int istart, int jstart, int kstart,
@@ -374,11 +413,13 @@ namespace
             const TF thh = static_cast<TF>(0.5) * (th[ijk-kk] + th[ijk]); // Half level liq. water pot. temp.
             const TF qth = static_cast<TF>(0.5) * (qt[ijk-kk] + qt[ijk]); // Half level specific hum.
 
-            qlh[ijk] = sat_adjust_g(thh, qth, ph[k], exnh[k]).ql; // Half level liquid water content
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+            const TF exnh_loc = swphydro_3d ? exner(ph_loc) : exnh[k];
+            qlh[ijk] = sat_adjust_g(thh, qth, ph_loc, exnh_loc).ql; // Half level liquid water content
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_ice_g(TF* __restrict__ qi, TF* __restrict__ th, TF* __restrict__ qt,
                              TF* __restrict__ exn, TF* __restrict__ p,
                              int istart, int jstart, int kstart,
@@ -392,11 +433,13 @@ namespace
         if (i < iend && j < jend && k < kend)
         {
             const int ijk = i + j*jj + k*kk;
-            qi[ijk] = sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]).qi;
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF exn_loc = swphydro_3d ? exner(p_loc) : exn[k];
+            qi[ijk] = sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc).qi;
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_condensate_g(TF* __restrict__ qc, TF* __restrict__ th, TF* __restrict__ qt,
                            TF* __restrict__ exn, TF* __restrict__ p,
                            int istart, int jstart, int kstart,
@@ -410,11 +453,13 @@ namespace
         if (i < iend && j < jend && k < kend)
         {
             const int ijk = i + j*jj + k*kk;
-            qc[ijk] = fmax(qt[ijk] - sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]).qs, TF(0.));
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF exn_loc = swphydro_3d ? exner(p_loc) : exn[k];
+            qc[ijk] = fmax(qt[ijk] - sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc).qs, TF(0.));
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_thv_g(
             TF* const __restrict__ thv,
             const TF* const __restrict__ thl,
@@ -433,13 +478,56 @@ namespace
         {
             const int ijk = i + j*icells + k*ijcells;
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exn[k]);
-            thv[ijk] = virtual_temperature(exn[k], thl[ijk], qt[ijk], ssa.ql, ssa.qi);
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF exn_loc = swphydro_3d ? exner(p_loc) : exn[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
+            thv[ijk] = virtual_temperature(exn_loc, thl[ijk], qt[ijk], ssa.ql, ssa.qi);
+        }
+    }
+
+    template<typename TF, Satadjust_field satadjust_fld, bool swphydro_3d> __global__
+    void calc_satadjust_fld_g(
+            TF* const __restrict__ fld,
+            const TF* const __restrict__ thl,
+            const TF* const __restrict__ qt,
+            const TF* const __restrict__ p,
+            const TF* const __restrict__ exn,
+            int istart, int jstart, int kstart,
+            int iend,   int jend,   int kend,
+            int icells, int ijcells)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart;
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const int ijk = i + j*icells + k*ijcells;
+
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF exn_loc = swphydro_3d ? exner(p_loc) : exn[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
+
+            if constexpr (satadjust_fld == Satadjust_field::ql)
+                fld[ijk] = ssa.ql;
+            else if constexpr (satadjust_fld == Satadjust_field::qi)
+                fld[ijk] = ssa.qi;
+            else if constexpr (satadjust_fld == Satadjust_field::qlqi)
+                fld[ijk] = ssa.ql + ssa.qi;
+            else if constexpr (satadjust_fld == Satadjust_field::qsat)
+                fld[ijk] = ssa.qs;
+            else if constexpr (satadjust_fld == Satadjust_field::T)
+                fld[ijk] = ssa.t;
+            else if constexpr (satadjust_fld == Satadjust_field::RH)
+            {
+                const TF rh = qt[ijk] / ssa.qs;
+                fld[ijk] = rh < TF(1.) ? rh : TF(1.);
+            }
         }
     }
 
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_land_surface_fields(
         TF* const __restrict__ T_bot,
         TF* const __restrict__ T_a,
@@ -449,8 +537,6 @@ namespace
         const TF* const __restrict__ thl_bot,
         const TF* const __restrict__ thl,
         const TF* const __restrict__ qt,
-        const TF* const __restrict__ exner,
-        const TF* const __restrict__ exnerh,
         const TF* const __restrict__ p,
         const TF* const __restrict__ ph,
         const int istart, const int iend,
@@ -466,10 +552,14 @@ namespace
         {
             const int ij = i + j*icells;
             const int ijk = ij + k*ijcells;
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+            const TF exn_loc = exner(p_loc);
+            const TF exnh_loc = exner(ph_loc);
 
             // Saturation adjustment for first model level
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exner[k]);
-            T_bot[ij] = exnerh[k] * thl_bot[ij];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
+            T_bot[ij] = exnh_loc * thl_bot[ij];
             T_a[ij] = ssa.t;
 
             // Vapor pressure deficit first model level
@@ -478,13 +568,84 @@ namespace
             vpd[ij] = es-e;
 
             // qsat(T_bot) + dqsatdT(T_bot)
-            qsat_bot[ij] = qsat(ph[k], T_bot[ij]);
-            dqsatdT_bot[ij] = dqsatdT(ph[k], T_bot[ij]);
+            qsat_bot[ij] = qsat(ph_loc, T_bot[ij]);
+            dqsatdT_bot[ij] = dqsatdT(ph_loc, T_bot[ij]);
         }
     }
 
 
-    template<typename TF> __global__
+    template<typename TF>
+    void calc_phydro_3d(
+        TF* const restrict phydro,
+        TF* const restrict phydroh,
+        const TF* const restrict phydro_tod,
+        const TF* const restrict thl,
+        const TF* const restrict qt,
+        const TF* const restrict dz,
+        const TF* const restrict dzh,
+        const int istart, const int iend,
+        const int jstart, const int jend,
+        const int kstart, const int kend,
+        const int jstride, const int kstride)
+    {
+        const int kk = kstride;
+
+        // First model level (TOD) deviates from others, as we only advance from
+        // zh[kend] to z[kend-1], instead of advancing a full half or full model level
+        // in the main loop below.
+        for (int j=jstart; j<jend; ++j)
+            for (int i=istart; i<iend; ++i)
+            {
+                const int ij  = i + j * jstride;
+                const int ijk = ij + kend * kstride;
+
+                // Boundary condition: hydrostatic pressure at TOD.
+                phydroh[ijk] = phydro_tod[ij];
+
+                // Calculate virtual temperature at half level.
+                const TF thlh = TF(0.5) * (thl[ijk-kk] + thl[ijk]);
+                const TF qth  = TF(0.5) * (qt [ijk-kk] + qt [ijk]);
+
+                const TF exh = exner(phydroh[ijk]);
+                Struct_sat_adjust<TF> ssa = sat_adjust(thlh, qth, phydroh[ijk], exh);
+                const TF thvh = virtual_temperature(exh, thlh, qth, ssa.ql, ssa.qi);
+
+                // Advance pressure from half (TOD) to full level.
+                phydro[ijk-kk] = phydroh[ijk] * std::exp(grav<TF> * TF(0.5) * dzh[kend] / (Rd<TF> * exh * thvh));
+            }
+
+        for (int k=kend-1; k>=kstart; --k)
+        {
+            for (int j=jstart; j<jend; ++j)
+                for (int i=istart; i<iend; ++i)
+                {
+                    const int ijk = i + j * jstride+ k * kstride;
+
+                    // Calculate full level virtual potential temperature.
+                    const TF ex = exner(phydro[ijk]);
+                    Struct_sat_adjust<TF> ssaf = sat_adjust(thl[ijk], qt[ijk], phydro[ijk], ex);
+                    const TF thv = virtual_temperature(ex, thl[ijk], qt[ijk], ssaf.ql, ssaf.qi);
+
+                    // Advance half level pressure.
+                    phydroh[ijk] = phydroh[ijk+kk] * std::exp(grav<TF> * dz[k] / (Rd<TF> * ex * thv));
+
+                    // Calculate half level virtual potential temperature.
+                    const TF exh = exner(phydroh[ijk]);
+
+                    const TF thlh = TF(0.5) * (thl[ijk-kk] + thl[ijk]);
+                    const TF qth  = TF(0.5) * (qt [ijk-kk] + qt [ijk]);
+
+                    Struct_sat_adjust<TF> ssah = sat_adjust(thlh, qth, phydroh[ijk], exh);
+                    const TF thvh = virtual_temperature(exh, thlh, qth, ssah.ql, ssah.qi);
+
+                    // Advance full level pressure.
+                    phydro[ijk-kk] = phydro[ijk] * std::exp(grav<TF> * dzh[k] / (Rd<TF> * exh * thvh));
+                }
+        }
+    }
+
+
+    template<typename TF, bool swphydro_3d> __global__
     void calc_radiation_fields_g(
             TF* restrict T, TF* restrict T_h, TF* restrict vmr_h2o,
             TF* restrict clwp, TF* restrict ciwp, TF* restrict T_sfc,
@@ -506,12 +667,14 @@ namespace
 
         if (i < iend && j < jend && k < kend)
         {
-            const TF ex = exner(p[k]);
-            const TF dpg = (ph[k] - ph[k+1]) / Constants::grav<TF>;
-
             const int ijk = i + j*jj + k*kk;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], ex);
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+            const TF ph_top_loc = swphydro_3d ? ph[ijk+kk] : ph[k+1];
+            const TF ex = exner(p_loc);
+            const TF dpg = (ph_loc - ph_top_loc) / Constants::grav<TF>;
+            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, ex);
 
             clwp[ijk_nogc] = ssa.ql * dpg;
             ciwp[ijk_nogc] = ssa.qi * dpg;
@@ -525,21 +688,24 @@ namespace
         // Exclude surface, is calculated below without saturation adjustment.
         if (i < iend && j < jend && k > kstart && k < kend+1)
         {
-            const TF exnh = exner(ph[k]);
             const int ijk = i + j*jj + k*kk;
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+            const TF exnh = exner(ph_loc);
 
             const TF thlh = interp2(thl[ijk-kk], thl[ijk]);
             const TF qth  = interp2(qt [ijk-kk], qt [ijk]);
 
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph[k], exnh).t;
+            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph_loc, exnh).t;
         }
 
         if (i < iend && j < jend && k == kstart)
         {
             // Calculate surface temperature (assuming no liquid water)
-            const TF exn_bot = exner(ph[kstart]);
             const int ij = i + j*jj;
+            const int ijk = ij + kstart*kk;
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[kstart];
+            const TF exn_bot = exner(ph_loc);
             const int ij_nogc = (i-igc) + (j-jgc)*jj_nogc;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (kstart-kgc)*kk_nogc;
 
@@ -548,7 +714,7 @@ namespace
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_radiation_fields_g(
             TF* restrict T, TF* restrict T_h, TF* restrict vmr_h2o, TF* restrict rh,
             TF* restrict clwp, TF* restrict ciwp, TF* restrict T_sfc,
@@ -570,12 +736,14 @@ namespace
 
         if (i < iend && j < jend && k < kend)
         {
-            const TF ex = exner(p[k]);
-            const TF dpg = (ph[k] - ph[k+1]) / Constants::grav<TF>;
-
             const int ijk = i + j*jj + k*kk;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], ex);
+            const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+            const TF ph_top_loc = swphydro_3d ? ph[ijk+kk] : ph[k+1];
+            const TF ex = exner(p_loc);
+            const TF dpg = (ph_loc - ph_top_loc) / Constants::grav<TF>;
+            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, ex);
 
             clwp[ijk_nogc] = ssa.ql * dpg;
             ciwp[ijk_nogc] = ssa.qi * dpg;
@@ -590,21 +758,24 @@ namespace
         // Exclude surface, is calculated below without saturation adjustment.
         if (i < iend && j < jend && k > kstart && k < kend+1)
         {
-            const TF exnh = exner(ph[k]);
             const int ijk = i + j*jj + k*kk;
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+            const TF exnh = exner(ph_loc);
 
             const TF thlh = interp2(thl[ijk-kk], thl[ijk]);
             const TF qth  = interp2(qt [ijk-kk], qt [ijk]);
 
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph[k], exnh).t;
+            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph_loc, exnh).t;
         }
 
         if (i < iend && j < jend && k == kstart)
         {
             // Calculate surface temperature (assuming no liquid water)
-            const TF exn_bot = exner(ph[kstart]);
             const int ij = i + j*jj;
+            const int ijk = ij + kstart*kk;
+            const TF ph_loc = swphydro_3d ? ph[ijk] : ph[kstart];
+            const TF exn_bot = exner(ph_loc);
             const int ij_nogc = (i-igc) + (j-jgc)*jj_nogc;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (kstart-kgc)*kk_nogc;
 
@@ -613,7 +784,7 @@ namespace
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool swphydro_3d> __global__
     void calc_radiation_columns_g(
             TF* const restrict T, TF* const restrict T_h, TF* const restrict vmr_h2o, TF* const restrict rh,
             TF* const restrict clwp, TF* const restrict ciwp, TF* const restrict T_sfc,
@@ -644,9 +815,12 @@ namespace
 
             if (k < kend)
             {
-                const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exner(p[k]));
+                const TF p_loc = swphydro_3d ? p[ijk] : p[k];
+                const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
+                const TF ph_top_loc = swphydro_3d ? ph[ijk+ijcells] : ph[k+1];
+                const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exner(p_loc));
 
-                const TF dpg = (ph[k] - ph[k+1]) / Constants::grav<TF>;
+                const TF dpg = (ph_loc - ph_top_loc) / Constants::grav<TF>;
                 clwp[ijk_out] = ssa.ql * dpg;
                 ciwp[ijk_out] = ssa.qi * dpg;
 
@@ -660,13 +834,15 @@ namespace
             {
                 const TF thlh = interp2(thl[ijk-ijcells], thl[ijk]);
                 const TF qth  = interp2(qt [ijk-ijcells], qt [ijk]);
+                const TF ph_loc = swphydro_3d ? ph[ijk] : ph[k];
 
-                T_h[ijk_out] = sat_adjust_g(thlh, qth, ph[k], exner(ph[k])).t;
+                T_h[ijk_out] = sat_adjust_g(thlh, qth, ph_loc, exner(ph_loc)).t;
             }
 
             if (k == kstart)
             {
-                T_sfc[ij_out] = thl_bot[ij] * exner(ph[kstart]);
+                const TF ph_loc = swphydro_3d ? ph[ijk] : ph[kstart];
+                T_sfc[ij_out] = thl_bot[ij] * exner(ph_loc);
                 T_h[ijk_out] = T_sfc[ij_out];
             }
         }
@@ -942,16 +1118,59 @@ void Thermo_moist<TF>::exec(const double dt, Stats<TF>& stats)
         forward_device();
     }
 
-    calc_buoyancy_tend_2nd_g<TF><<<gridGPU, blockGPU>>>(
-            fields.mt.at("w")->fld_g,
-            fields.sp.at("thl")->fld_g,
-            fields.sp.at("qt")->fld_g,
-            bs.thvrefh_g,
-            bs.exnrefh_g,
-            bs.prefh_g,
-            gd.istart, gd.jstart, gd.kstart+1,
-            gd.iend,   gd.jend,   gd.kend,
-            gd.icells, gd.ijcells);
+    if (swphydro_3d && swtimedep_phydro_3d)
+    {
+        fields.backward_field_device_3d(fields.sp.at("thl")->fld.data(), fields.sp.at("thl")->fld_g);
+        fields.backward_field_device_3d(fields.sp.at("qt")->fld.data(), fields.sp.at("qt")->fld_g);
+
+        calc_phydro_3d(
+                fields.sd.at("phydro_3d")->fld.data(),
+                fields.sd.at("phydroh_3d")->fld.data(),
+                phydro_tod.data(),
+                fields.sp.at("thl")->fld.data(),
+                fields.sp.at("qt")->fld.data(),
+                gd.dz.data(),
+                gd.dzh.data(),
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+
+        // Overwrite mean profiles p and ph in basestate.
+        field3d_operators.calc_mean_profile(bs.pref.data(), fields.sd.at("phydro_3d")->fld.data());
+        field3d_operators.calc_mean_profile(bs.prefh.data(), fields.sd.at("phydroh_3d")->fld.data());
+        bs.pbot = bs.prefh[gd.kstart];
+
+        forward_device();
+        fields.forward_field_device_3d(fields.sd.at("phydro_3d")->fld_g, fields.sd.at("phydro_3d")->fld.data());
+        fields.forward_field_device_3d(fields.sd.at("phydroh_3d")->fld_g, fields.sd.at("phydroh_3d")->fld.data());
+    }
+
+    if (swphydro_3d)
+    {
+        calc_buoyancy_tend_2nd_3d_g<TF><<<gridGPU, blockGPU>>>(
+                fields.mt.at("w")->fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.thvrefh_g,
+                fields.sd.at("phydroh_3d")->fld_g,
+                gd.istart, gd.jstart, gd.kstart+1,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+    }
+    else
+    {
+        calc_buoyancy_tend_2nd_g<TF><<<gridGPU, blockGPU>>>(
+                fields.mt.at("w")->fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.thvrefh_g,
+                bs.exnrefh_g,
+                bs.prefh_g,
+                gd.istart, gd.jstart, gd.kstart+1,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+    }
     cuda_check_error();
 
     cudaDeviceSynchronize();
@@ -1008,69 +1227,191 @@ void Thermo_moist<TF>::get_thermo_field_g(
 
     if (name == "b")
     {
-        calc_buoyancy_g<TF><<<gridGPU, blockGPU>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.thvref_g, bs.pref_g, bs.exnref_g,
-            gd.istart,  gd.jstart, gd.kstart,
-            gd.iend, gd.jend, gd.kcells,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_buoyancy_g<TF, true><<<gridGPU, blockGPU>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.thvref_g, fields.sd.at("phydro_3d")->fld_g, bs.exnref_g,
+                gd.istart,  gd.jstart, gd.kstart,
+                gd.iend, gd.jend, gd.kcells,
+                gd.icells, gd.ijcells);
+        else
+            calc_buoyancy_g<TF, false><<<gridGPU, blockGPU>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.thvref_g, bs.pref_g, bs.exnref_g,
+                gd.istart,  gd.jstart, gd.kstart,
+                gd.iend, gd.jend, gd.kcells,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "b_h")
     {
-        calc_buoyancy_g<TF><<<gridGPU, blockGPU>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.thvrefh_g, bs.prefh_g, bs.exnrefh_g,
-            gd.istart,  gd.jstart, gd.kstart,
-            gd.iend, gd.jend, gd.kcells,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_buoyancy_h_g<TF, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.thvrefh_g, fields.sd.at("phydroh_3d")->fld_g, bs.exnrefh_g,
+                gd.istart,  gd.jstart, gd.kstart,
+                gd.iend, gd.jend, gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_buoyancy_h_g<TF, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.thvrefh_g, bs.prefh_g, bs.exnrefh_g,
+                gd.istart,  gd.jstart, gd.kstart,
+                gd.iend, gd.jend, gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "ql")
     {
-        calc_liquid_water_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
-            gd.istart,  gd.jstart,  gd.kstart,
-            gd.iend,    gd.jend,    gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_liquid_water_g<TF, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnref_g, fields.sd.at("phydro_3d")->fld_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_liquid_water_g<TF, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnref_g, bs.pref_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "ql_h")
     {
-        calc_liquid_water_h_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnrefh_g, bs.prefh_g,
-            gd.istart,  gd.jstart,  gd.kstart,
-            gd.iend,    gd.jend,    gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_liquid_water_h_g<TF, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnrefh_g, fields.sd.at("phydroh_3d")->fld_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_liquid_water_h_g<TF, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnrefh_g, bs.prefh_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "qi")
     {
-        calc_ice_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
-            gd.istart,  gd.jstart,  gd.kstart,
-            gd.iend,    gd.jend,    gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_ice_g<TF, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnref_g, fields.sd.at("phydro_3d")->fld_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_ice_g<TF, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnref_g, bs.pref_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "qlqi")
     {
-        calc_liquid_and_ice_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g,
-            fields.sp.at("thl")->fld_g,
-            fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
-            gd.istart,  gd.jstart,  gd.kstart,
-            gd.iend,    gd.jend,    gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_liquid_and_ice_g<TF, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.exnref_g, fields.sd.at("phydro_3d")->fld_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_liquid_and_ice_g<TF, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.exnref_g, bs.pref_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+    }
+    else if (name == "qsat")
+    {
+        if (swphydro_3d)
+            calc_satadjust_fld_g<TF, Satadjust_field::qsat, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_satadjust_fld_g<TF, Satadjust_field::qsat, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.pref_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+    }
+    else if (name == "rh")
+    {
+        if (swphydro_3d)
+            calc_satadjust_fld_g<TF, Satadjust_field::RH, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_satadjust_fld_g<TF, Satadjust_field::RH, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.pref_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+    }
+    else if (name == "T")
+    {
+        if (swphydro_3d)
+            calc_satadjust_fld_g<TF, Satadjust_field::T, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_satadjust_fld_g<TF, Satadjust_field::T, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.pref_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "qlqi")
     {
-        calc_condensate_g<TF><<<gridGPU2, blockGPU2>>>(
+        calc_condensate_g<TF, false><<<gridGPU2, blockGPU2>>>(
             fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
             bs.exnrefh_g, bs.prefh_g,
             gd.istart,  gd.jstart,  gd.kstart,
@@ -1090,15 +1431,26 @@ void Thermo_moist<TF>::get_thermo_field_g(
     }
     else if (name == "thv")
     {
-        calc_thv_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g,
-            fields.sp.at("thl")->fld_g,
-            fields.sp.at("qt")->fld_g,
-            bs.pref_g,
-            bs.exnref_g,
-            gd.istart, gd.jstart, gd.kstart,
-            gd.iend,   gd.jend,   gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_thv_g<TF, true><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_thv_g<TF, false><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.pref_g,
+                bs.exnref_g,
+                gd.istart, gd.jstart, gd.kstart,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else
@@ -1127,6 +1479,10 @@ TF* Thermo_moist<TF>::get_basestate_fld_g(std::string name)
         return bs.rhorefh_g;
     else if (name == "thvh")
         return bs.thvrefh_g;
+    else if (name == "phydro_3d")
+        return fields.sd.at("phydro_3d")->fld_g;
+    else if (name == "phydroh_3d")
+        return fields.sd.at("phydroh_3d")->fld_g;
     else
     {
         std::string error_message = "Can not get basestate field \"" + name + "\" from thermo_moist";
@@ -1223,6 +1579,9 @@ void Thermo_moist<TF>::exec_column(Column<TF>& column)
     dim3 gridGPU (gridi, gridj);
     dim3 blockGPU(blocki, blockj);
 
+    get_thermo_field_g(*output, "T", false);
+    column.calc_column("T", output->fld_g, no_offset);
+
     get_thermo_field_g(*output, "thv", false);
     column.calc_column("thv", output->fld_g, no_offset);
 
@@ -1262,6 +1621,17 @@ void Thermo_moist<TF>::exec_column(Column<TF>& column)
     column.calc_time_series("thl_bot", fields.ap.at("thl")->fld_bot_g, no_offset);
     column.calc_time_series("qt_bot",  fields.ap.at("qt")->fld_bot_g,  no_offset);
 
+    if (swphydro_3d)
+    {
+        column.calc_column("phydro", fields.sd.at("phydro_3d")->fld_g, no_offset);
+        column.calc_column("phydroh", fields.sd.at("phydroh_3d")->fld_g, no_offset);
+    }
+    else
+    {
+        column.set_all_columns("phydro", bs.pref.data(), no_offset);
+        column.set_all_columns("phydroh", bs.prefh.data(), no_offset);
+    }
+
     fields.release_tmp_g(output);
 }
 #endif
@@ -1281,18 +1651,33 @@ void Thermo_moist<TF>::get_radiation_fields_g(
     dim3 gridGPU(gridi, gridj, gd.ktot+1);
     dim3 blockGPU(blocki, blockj, 1);
 
-    calc_radiation_fields_g<TF><<<gridGPU, blockGPU>>>(
-            T.fld_g, T_h.fld_g, qv.fld_g,
-            clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
-            fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            fields.sp.at("thl")->fld_bot_g,
-            bs.pref_g, bs.prefh_g,
-            gd.istart, gd.iend,
-            gd.jstart, gd.jend,
-            gd.kstart, gd.kend,
-            gd.igc, gd.jgc, gd.kgc,
-            gd.icells, gd.ijcells,
-            gd.imax, gd.imax*gd.jmax);
+    if (swphydro_3d)
+        calc_radiation_fields_g<TF, true><<<gridGPU, blockGPU>>>(
+                T.fld_g, T_h.fld_g, qv.fld_g,
+                clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
+                fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                fields.sp.at("thl")->fld_bot_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                fields.sd.at("phydroh_3d")->fld_g,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.igc, gd.jgc, gd.kgc,
+                gd.icells, gd.ijcells,
+                gd.imax, gd.imax*gd.jmax);
+    else
+        calc_radiation_fields_g<TF, false><<<gridGPU, blockGPU>>>(
+                T.fld_g, T_h.fld_g, qv.fld_g,
+                clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
+                fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                fields.sp.at("thl")->fld_bot_g,
+                bs.pref_g, bs.prefh_g,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.igc, gd.jgc, gd.kgc,
+                gd.icells, gd.ijcells,
+                gd.imax, gd.imax*gd.jmax);
     cuda_check_error();
 }
 #endif
@@ -1312,18 +1697,33 @@ void Thermo_moist<TF>::get_radiation_fields_g(
     dim3 gridGPU(gridi, gridj, gd.ktot+1);
     dim3 blockGPU(blocki, blockj, 1);
 
-    calc_radiation_fields_g<TF><<<gridGPU, blockGPU>>>(
-            T.fld_g, T_h.fld_g, qv.fld_g, rh.fld_g,
-            clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
-            fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            fields.sp.at("thl")->fld_bot_g,
-            bs.pref_g, bs.prefh_g,
-            gd.istart, gd.iend,
-            gd.jstart, gd.jend,
-            gd.kstart, gd.kend,
-            gd.igc, gd.jgc, gd.kgc,
-            gd.icells, gd.ijcells,
-            gd.imax, gd.imax*gd.jmax);
+    if (swphydro_3d)
+        calc_radiation_fields_g<TF, true><<<gridGPU, blockGPU>>>(
+                T.fld_g, T_h.fld_g, qv.fld_g, rh.fld_g,
+                clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
+                fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                fields.sp.at("thl")->fld_bot_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                fields.sd.at("phydroh_3d")->fld_g,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.igc, gd.jgc, gd.kgc,
+                gd.icells, gd.ijcells,
+                gd.imax, gd.imax*gd.jmax);
+    else
+        calc_radiation_fields_g<TF, false><<<gridGPU, blockGPU>>>(
+                T.fld_g, T_h.fld_g, qv.fld_g, rh.fld_g,
+                clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
+                fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                fields.sp.at("thl")->fld_bot_g,
+                bs.pref_g, bs.prefh_g,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.igc, gd.jgc, gd.kgc,
+                gd.icells, gd.ijcells,
+                gd.imax, gd.imax*gd.jmax);
     cuda_check_error();
 }
 
@@ -1357,18 +1757,32 @@ void Thermo_moist<TF>::get_radiation_columns_g(
     dim3 gridGPU(gridi, gridj);
     dim3 blockGPU(blocki, blockj);
 
-    calc_radiation_columns_g<TF><<<gridGPU, blockGPU>>>(
-            t_lay_a, t_lev_a, h2o_a, rh_a, clwp_a, ciwp_a, t_sfc_a,
-            fields.sp.at("thl")->fld_g,
-            fields.sp.at("qt")->fld_g,
-            fields.sp.at("thl")->fld_bot_g,
-            bs.pref_g,
-            bs.prefh_g,
-            col_i_g,
-            col_j_g,
-            n_cols,
-            gd.kgc, gd.kstart, gd.kend,
-            gd.icells, gd.ijcells);
+    if (swphydro_3d)
+        calc_radiation_columns_g<TF, true><<<gridGPU, blockGPU>>>(
+                t_lay_a, t_lev_a, h2o_a, rh_a, clwp_a, ciwp_a, t_sfc_a,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                fields.sp.at("thl")->fld_bot_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                fields.sd.at("phydroh_3d")->fld_g,
+                col_i_g,
+                col_j_g,
+                n_cols,
+                gd.kgc, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+    else
+        calc_radiation_columns_g<TF, false><<<gridGPU, blockGPU>>>(
+                t_lay_a, t_lev_a, h2o_a, rh_a, clwp_a, ciwp_a, t_sfc_a,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                fields.sp.at("thl")->fld_bot_g,
+                bs.pref_g,
+                bs.prefh_g,
+                col_i_g,
+                col_j_g,
+                n_cols,
+                gd.kgc, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
     cuda_check_error();
 }
 
@@ -1390,17 +1804,29 @@ void Thermo_moist<TF>::get_land_surface_fields_g(
     dim3 gridGPU (gridi, gridj, 1);
     dim3 blockGPU(blocki, blockj, 1);
 
-    calc_land_surface_fields<TF><<<gridGPU, blockGPU>>>(
-        T_bot, T_a, vpd, qsat_bot, dqsatdT_bot,
-        fields.sp.at("thl")->fld_bot_g,
-        fields.sp.at("thl")->fld_g,
-        fields.sp.at("qt")->fld_g,
-        bs.exnref_g, bs.exnrefh_g,
-        bs.pref_g, bs.prefh_g,
-        gd.istart, gd.iend,
-        gd.jstart, gd.jend,
-        gd.kstart,
-        gd.icells, gd.ijcells);
+    if (swphydro_3d)
+        calc_land_surface_fields<TF, true><<<gridGPU, blockGPU>>>(
+            T_bot, T_a, vpd, qsat_bot, dqsatdT_bot,
+            fields.sp.at("thl")->fld_bot_g,
+            fields.sp.at("thl")->fld_g,
+            fields.sp.at("qt")->fld_g,
+            fields.sd.at("phydro_3d")->fld_g,
+            fields.sd.at("phydroh_3d")->fld_g,
+            gd.istart, gd.iend,
+            gd.jstart, gd.jend,
+            gd.kstart,
+            gd.icells, gd.ijcells);
+    else
+        calc_land_surface_fields<TF, false><<<gridGPU, blockGPU>>>(
+            T_bot, T_a, vpd, qsat_bot, dqsatdT_bot,
+            fields.sp.at("thl")->fld_bot_g,
+            fields.sp.at("thl")->fld_g,
+            fields.sp.at("qt")->fld_g,
+            bs.pref_g, bs.prefh_g,
+            gd.istart, gd.iend,
+            gd.jstart, gd.jend,
+            gd.kstart,
+            gd.icells, gd.ijcells);
     cuda_check_error();
 }
 #endif

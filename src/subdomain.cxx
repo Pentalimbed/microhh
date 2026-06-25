@@ -306,6 +306,17 @@ void Subdomain<TF>::save_bcs(
     auto& gd = grid.get_grid_data();
     auto& md = master.get_MPI_data();
 
+    const bool save_lbc_now = timeloop.get_itime() % convert_to_itime(savetime_bcs) == 0;
+    const bool save_buffer_now = sw_save_buffer && timeloop.get_itime() % convert_to_itime(savetime_buffer) == 0;
+
+    if (!save_lbc_now && !save_buffer_now)
+        return;
+
+    #ifdef USECUDA
+    for (auto& fld : fields.ap)
+        fields.backward_field_device_3d(fld.second->fld.data(), fld.second->fld_g);
+    #endif
+
     auto save_binary = [&](
             NN_interpolator<TF>& lbc,
             const std::string& filename)
@@ -449,7 +460,7 @@ void Subdomain<TF>::save_bcs(
     };
 
 
-    if (timeloop.get_itime() % convert_to_itime(savetime_bcs) == 0)
+    if (save_lbc_now)
     {
         // Save boundary conditions (lateral + top).
         std::string msg = "Saving subdomain LBCs for time " + std::to_string(timeloop.get_time()) + " ...";
@@ -497,7 +508,7 @@ void Subdomain<TF>::save_bcs(
         }
     }
 
-    if (sw_save_buffer && timeloop.get_itime() % convert_to_itime(savetime_buffer) == 0)
+    if (save_buffer_now)
     {
         // Save buffer layer.
         std::string msg = "Saving sub-domain buffer for time " + std::to_string(timeloop.get_time()) + " ...";

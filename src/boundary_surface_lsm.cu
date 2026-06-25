@@ -94,7 +94,21 @@ void Boundary_surface_lsm<TF>::exec(
     TF* du_tot = tmp1->fld_bot_g;
 
     if (sw_charnock)
-        throw std::runtime_error("Charnock not (yet) implemented on the GPU...");
+    {
+        lsmk::calc_z0_charnock_g<TF><<<grid_gpu_2d, block_gpu_2d>>>(
+                z0m_g, z0h_g,
+                ustar_g,
+                water_mask_g,
+                alpha_m, alpha_ch, alpha_h,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.icells);
+        cuda_check_error();
+
+        boundary_cyclic.exec_2d_g(z0m_g);
+        boundary_cyclic.exec_2d_g(z0h_g);
+    }
+
 
     bsk::calc_dutot_g<TF><<<grid_gpu_2d, block_gpu_2d>>>(
         du_tot,
@@ -136,9 +150,10 @@ void Boundary_surface_lsm<TF>::exec(
 
     // Get basestate vectors.
     TF* rhorefh = thermo.get_basestate_fld_g("rhoh");
-    TF* thvrefh = thermo.get_basestate_fld_g("thvh");
-    TF* exnrefh = thermo.get_basestate_fld_g("exnerh");
-    TF* prefh   = thermo.get_basestate_fld_g("prefh");
+    const bool pressure_is_3d = thermo.pressure_is_3d();
+    TF* prefh = pressure_is_3d
+              ? thermo.get_basestate_fld_g("phydroh_3d")
+              : thermo.get_basestate_fld_g("prefh");
 
     // Get surface precipitation (positive downwards, kg m-2 s-1 = mm s-1)
     auto tmp2 = fields.get_tmp_g();
@@ -288,37 +303,78 @@ void Boundary_surface_lsm<TF>::exec(
         //throw 1;
 
         // Calculate surface fluxes
-        lsmk::calc_fluxes_g<TF><<<grid_gpu_2d, block_gpu_2d>>>(
-                tile.second.H_g,
-                tile.second.LE_g,
-                tile.second.G_g,
-                tile.second.S_g,
-                tile.second.thl_bot_g,
-                tile.second.qt_bot_g,
-                T_a,
-                fields.sp.at("qt")->fld_g,
-                fields.sps.at("t")->fld_g,
-                qsat_bot, dqsatdT_bot,
-                tile.second.ra_g,
-                tile.second.rs_g,
-                lambda_stable_g,
-                lambda_unstable_g,
-                cs_veg_g,
-                sw_dn,
-                sw_up,
-                lw_dn,
-                lw_up,
-                buoy->fld_g,
-                buoy->fld_bot_g,
-                rhorefh,
-                exnrefh,
-                db_ref, emis_sfc,
-                TF(subdt),
-                gd.istart, gd.iend,
-                gd.jstart, gd.jend,
-                gd.kstart, sgd.kend,
-                gd.icells, gd.ijcells,
-                use_cs_veg);
+        auto calc_fluxes_3d = [&]()
+        {
+            lsmk::calc_fluxes_g<TF, true><<<grid_gpu_2d, block_gpu_2d>>>(
+                    tile.second.H_g,
+                    tile.second.LE_g,
+                    tile.second.G_g,
+                    tile.second.S_g,
+                    tile.second.thl_bot_g,
+                    tile.second.qt_bot_g,
+                    T_a,
+                    fields.sp.at("qt")->fld_g,
+                    fields.sps.at("t")->fld_g,
+                    qsat_bot, dqsatdT_bot,
+                    tile.second.ra_g,
+                    tile.second.rs_g,
+                    lambda_stable_g,
+                    lambda_unstable_g,
+                    cs_veg_g,
+                    sw_dn,
+                    sw_up,
+                    lw_dn,
+                    lw_up,
+                    buoy->fld_g,
+                    buoy->fld_bot_g,
+                    rhorefh,
+                    prefh,
+                    db_ref, emis_sfc,
+                    TF(subdt),
+                    gd.istart, gd.iend,
+                    gd.jstart, gd.jend,
+                    gd.kstart, sgd.kend,
+                    gd.icells, gd.ijcells,
+                    use_cs_veg);
+        };
+        auto calc_fluxes_1d = [&]()
+        {
+            lsmk::calc_fluxes_g<TF, false><<<grid_gpu_2d, block_gpu_2d>>>(
+                    tile.second.H_g,
+                    tile.second.LE_g,
+                    tile.second.G_g,
+                    tile.second.S_g,
+                    tile.second.thl_bot_g,
+                    tile.second.qt_bot_g,
+                    T_a,
+                    fields.sp.at("qt")->fld_g,
+                    fields.sps.at("t")->fld_g,
+                    qsat_bot, dqsatdT_bot,
+                    tile.second.ra_g,
+                    tile.second.rs_g,
+                    lambda_stable_g,
+                    lambda_unstable_g,
+                    cs_veg_g,
+                    sw_dn,
+                    sw_up,
+                    lw_dn,
+                    lw_up,
+                    buoy->fld_g,
+                    buoy->fld_bot_g,
+                    rhorefh,
+                    prefh,
+                    db_ref, emis_sfc,
+                    TF(subdt),
+                    gd.istart, gd.iend,
+                    gd.jstart, gd.jend,
+                    gd.kstart, sgd.kend,
+                    gd.icells, gd.ijcells,
+                    use_cs_veg);
+        };
+        if (pressure_is_3d)
+            calc_fluxes_3d();
+        else
+            calc_fluxes_1d();
         cuda_check_error();
     }
 
@@ -326,38 +382,78 @@ void Boundary_surface_lsm<TF>::exec(
     if (sw_water)
     {
         // Set BCs for water grid points
-        lsmk::set_water_tiles<TF><<<grid_gpu_2d, block_gpu_2d>>>(
-                tiles.at("veg").fraction_g,
-                tiles.at("soil").fraction_g,
-                tiles.at("wet").fraction_g,
-                tiles.at("veg").H_g,
-                tiles.at("soil").H_g,
-                tiles.at("wet").H_g,
-                tiles.at("veg").LE_g,
-                tiles.at("soil").LE_g,
-                tiles.at("wet").LE_g,
-                tiles.at("veg").G_g,
-                tiles.at("soil").G_g,
-                tiles.at("wet").G_g,
-                tiles.at("veg").rs_g,
-                tiles.at("soil").rs_g,
-                tiles.at("wet").rs_g,
-                tiles.at("wet").thl_bot_g,
-                tiles.at("wet").qt_bot_g,
-                water_mask_g,
-                t_bot_water_g,
-                fields.sp.at("thl")->fld_g,
-                fields.sp.at("qt")->fld_g,
-                fields.sp.at("thl")->fld_bot_g,
-                fields.sp.at("qt")->fld_bot_g,
-                tiles.at("wet").ra_g,
-                rhorefh,
-                prefh,
-                exnrefh,
-                gd.istart, gd.iend,
-                gd.jstart, gd.jend,
-                gd.kstart,
-                gd.icells, gd.ijcells);
+        auto set_water_tiles_3d = [&]()
+        {
+            lsmk::set_water_tiles<TF, true><<<grid_gpu_2d, block_gpu_2d>>>(
+                    tiles.at("veg").fraction_g,
+                    tiles.at("soil").fraction_g,
+                    tiles.at("wet").fraction_g,
+                    tiles.at("veg").H_g,
+                    tiles.at("soil").H_g,
+                    tiles.at("wet").H_g,
+                    tiles.at("veg").LE_g,
+                    tiles.at("soil").LE_g,
+                    tiles.at("wet").LE_g,
+                    tiles.at("veg").G_g,
+                    tiles.at("soil").G_g,
+                    tiles.at("wet").G_g,
+                    tiles.at("veg").rs_g,
+                    tiles.at("soil").rs_g,
+                    tiles.at("wet").rs_g,
+                    tiles.at("wet").thl_bot_g,
+                    tiles.at("wet").qt_bot_g,
+                    water_mask_g,
+                    t_bot_water_g,
+                    fields.sp.at("thl")->fld_g,
+                    fields.sp.at("qt")->fld_g,
+                    fields.sp.at("thl")->fld_bot_g,
+                    fields.sp.at("qt")->fld_bot_g,
+                    tiles.at("wet").ra_g,
+                    rhorefh,
+                    prefh,
+                    gd.istart, gd.iend,
+                    gd.jstart, gd.jend,
+                    gd.kstart,
+                    gd.icells, gd.ijcells);
+        };
+        auto set_water_tiles_1d = [&]()
+        {
+            lsmk::set_water_tiles<TF, false><<<grid_gpu_2d, block_gpu_2d>>>(
+                    tiles.at("veg").fraction_g,
+                    tiles.at("soil").fraction_g,
+                    tiles.at("wet").fraction_g,
+                    tiles.at("veg").H_g,
+                    tiles.at("soil").H_g,
+                    tiles.at("wet").H_g,
+                    tiles.at("veg").LE_g,
+                    tiles.at("soil").LE_g,
+                    tiles.at("wet").LE_g,
+                    tiles.at("veg").G_g,
+                    tiles.at("soil").G_g,
+                    tiles.at("wet").G_g,
+                    tiles.at("veg").rs_g,
+                    tiles.at("soil").rs_g,
+                    tiles.at("wet").rs_g,
+                    tiles.at("wet").thl_bot_g,
+                    tiles.at("wet").qt_bot_g,
+                    water_mask_g,
+                    t_bot_water_g,
+                    fields.sp.at("thl")->fld_g,
+                    fields.sp.at("qt")->fld_g,
+                    fields.sp.at("thl")->fld_bot_g,
+                    fields.sp.at("qt")->fld_bot_g,
+                    tiles.at("wet").ra_g,
+                    rhorefh,
+                    prefh,
+                    gd.istart, gd.iend,
+                    gd.jstart, gd.jend,
+                    gd.kstart,
+                    gd.icells, gd.ijcells);
+        };
+        if (pressure_is_3d)
+            set_water_tiles_3d();
+        else
+            set_water_tiles_1d();
         cuda_check_error();
     }
 
@@ -728,14 +824,31 @@ void Boundary_surface_lsm<TF>::exec(
 }
 
 template<typename TF>
-void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column)
+void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column, Thermo<TF>& thermo)
 {
+    auto& gd = grid.get_grid_data();
+
+    const int blocki = gd.ithread_block;
+    const int blockj = gd.jthread_block;
+    const int gridi  = gd.imax/blocki + (gd.imax%blocki > 0);
+    const int gridj  = gd.jmax/blockj + (gd.jmax%blockj > 0);
+
+    dim3 gridGPU(gridi, gridj);
+    dim3 blockGPU(blocki, blockj);
+
     const TF no_offset = 0.;
 
     auto tmp = fields.get_tmp_g();
 
     column.calc_time_series("obuk", obuk_g, no_offset);
     column.calc_time_series("ustar", ustar_g, no_offset);
+
+    if (sw_charnock)
+    {
+        column.calc_time_series("z0m", z0m_g, no_offset);
+        column.calc_time_series("z0h", z0h_g, no_offset);
+    }
+
     column.calc_time_series("wl", fields.ap2d.at("wl")->fld_g, no_offset);
 
     get_tiled_mean_g(tmp->fld_bot_g, "H", TF(1));
@@ -749,6 +862,63 @@ void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column)
 
     get_tiled_mean_g(tmp->fld_bot_g, "S", TF(1));
     column.calc_time_series("S", tmp->fld_bot_g, no_offset);
+
+    const bool pressure_is_3d = thermo.pressure_is_3d();
+    TF* phydroh = pressure_is_3d
+                ? thermo.get_basestate_fld_g("phydroh_3d")
+                : thermo.get_basestate_fld_g("prefh");
+
+    if (pressure_is_3d)
+        lsmk::diagnose_1_5m_10m_MO_g<TF, true><<<gridGPU, blockGPU>>>(
+                tmp->fld_bot_g,
+                tmp->fld_top_g,
+                tmp->grad_bot_g,
+                tmp->grad_top_g,
+                tmp->flux_bot_g,
+                fields.ap.at("thl")->fld_bot_g,
+                fields.ap.at("qt")->fld_bot_g,
+                fields.ap.at("thl")->flux_bot_g,
+                fields.ap.at("qt")->flux_bot_g,
+                fields.ap.at("u")->flux_bot_g,
+                fields.ap.at("v")->flux_bot_g,
+                ustar_g,
+                obuk_g,
+                z0m_g,
+                z0h_g,
+                phydroh,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart,
+                gd.icells, gd.ijcells);
+    else
+        lsmk::diagnose_1_5m_10m_MO_g<TF, false><<<gridGPU, blockGPU>>>(
+                tmp->fld_bot_g,
+                tmp->fld_top_g,
+                tmp->grad_bot_g,
+                tmp->grad_top_g,
+                tmp->flux_bot_g,
+                fields.ap.at("thl")->fld_bot_g,
+                fields.ap.at("qt")->fld_bot_g,
+                fields.ap.at("thl")->flux_bot_g,
+                fields.ap.at("qt")->flux_bot_g,
+                fields.ap.at("u")->flux_bot_g,
+                fields.ap.at("v")->flux_bot_g,
+                ustar_g,
+                obuk_g,
+                z0m_g,
+                z0h_g,
+                phydroh,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart,
+                gd.icells, gd.ijcells);
+    cuda_check_error();
+
+    column.calc_time_series("T_1_5m", tmp->fld_bot_g, no_offset);
+    column.calc_time_series("q_1_5m", tmp->fld_top_g, no_offset);
+    column.calc_time_series("u_10m", tmp->grad_bot_g, no_offset);
+    column.calc_time_series("v_10m", tmp->grad_top_g, no_offset);
+    column.calc_time_series("U_10m", tmp->flux_bot_g, no_offset);
 
     if (sw_tile_stats_col)
         for (auto& tile : tiles)
@@ -1078,6 +1248,8 @@ void Boundary_surface_lsm<TF>::backward_device(Thermo<TF>& thermo)
     // NOTE: only copy back the required/useful data...
     cuda_safe_call(cudaMemcpy(obuk.data(),  obuk_g,  tf_memsize_ij, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(ustar.data(), ustar_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
+    cuda_safe_call(cudaMemcpy(z0m.data(), z0m_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
+    cuda_safe_call(cudaMemcpy(z0h.data(), z0h_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
 
     cuda_safe_call(cudaMemcpy(dudz_mo.data(), dudz_mo_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(dvdz_mo.data(), dvdz_mo_g, tf_memsize_ij, cudaMemcpyDeviceToHost));

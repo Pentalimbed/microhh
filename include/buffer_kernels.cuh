@@ -48,5 +48,50 @@ namespace Buffer_kernels
             at[ijk] -= sigma_z[k] * (a[ijk]-abuf[k]);
         }
     };
+
+    template<typename TF>
+    struct buffer_3d_g
+    {
+        DEFINE_GRID_KERNEL("buffer::buffer_3d_g", 0)
+
+        template <typename Level>
+        CUDA_DEVICE
+        void operator()(
+                Grid_layout g, const int i, const int j, const int k, const Level level,
+                TF* const __restrict__ at,
+                const TF* const __restrict__ a,
+                const TF* const __restrict__ abuf,
+                const TF* const __restrict__ sigma_z)
+        {
+            const int ijk = g(i, j, k);
+            const int ijk_buf = g(i, j, k-g.kstart);
+            at[ijk] -= sigma_z[k] * (a[ijk]-abuf[ijk_buf]);
+        }
+    };
+
+    template<typename TF>
+    struct buffer_local_g
+    {
+        DEFINE_GRID_KERNEL("buffer::buffer_local_g", 0)
+
+        template <typename Level>
+        CUDA_DEVICE
+        void operator()(
+                Grid_layout g, const int i, const int j, const int k, const Level level,
+                TF* const __restrict__ at,
+                const TF* const __restrict__ a,
+                const TF* const __restrict__ sigma_z)
+        {
+            const int ijk = g(i, j, k);
+
+            TF abuf = TF(0);
+            for (int jc=-3; jc<4; ++jc)
+                for (int ic=-3; ic<4; ++ic)
+                    abuf += a[g(i+ic, j+jc, k)];
+
+            abuf /= TF(49);
+            at[ijk] -= sigma_z[k] * (a[ijk]-abuf);
+        }
+    };
 }
 #endif // BUFFER_KERNELS_CUH

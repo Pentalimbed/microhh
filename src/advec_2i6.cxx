@@ -854,11 +854,17 @@ void Advec_2i6<TF>::create(Stats<TF>& stats)
         stats.add_tendency(*it.second, "z", tend_name, tend_longname);
 }
 
-#ifndef USECUDA
 template<typename TF>
 double Advec_2i6<TF>::get_cfl(double dt)
 {
     auto& gd = grid.get_grid_data();
+
+    #ifdef USECUDA
+    fields.backward_field_device_3d(fields.mp.at("u")->fld.data(), fields.mp.at("u")->fld_g);
+    fields.backward_field_device_3d(fields.mp.at("v")->fld.data(), fields.mp.at("v")->fld_g);
+    fields.backward_field_device_3d(fields.mp.at("w")->fld.data(), fields.mp.at("w")->fld_g);
+    #endif
+
     TF cfl = calc_cfl<TF>(
             fields.mp.at("u")->fld.data(),
             fields.mp.at("v")->fld.data(),
@@ -878,19 +884,7 @@ template<typename TF>
 unsigned long Advec_2i6<TF>::get_time_limit(unsigned long idt, double dt)
 {
     // Calculate cfl and prevent zero divisons.
-    auto& gd = grid.get_grid_data();
-
-    double cfl = calc_cfl<TF>(
-            fields.mp.at("u")->fld.data(),
-            fields.mp.at("v")->fld.data(),
-            fields.mp.at("w")->fld.data(),
-            gd.dzi.data(), gd.dx, gd.dy,
-            dt, master,
-            gd.istart, gd.iend,
-            gd.jstart, gd.jend,
-            gd.kstart, gd.kend,
-            gd.icells, gd.ijcells);
-
+    double cfl = get_cfl(dt);
     cfl = std::max(cflmin, cfl);
     return idt * cflmax / cfl;
 }
@@ -900,6 +894,14 @@ template<typename TF>
 void Advec_2i6<TF>::exec(Stats<TF>& stats)
 {
     auto& gd = grid.get_grid_data();
+
+    #ifdef USECUDA
+    for (auto& it : fields.ap)
+        fields.backward_field_device_3d(it.second->fld.data(), it.second->fld_g);
+    for (auto& it : fields.at)
+        fields.backward_field_device_3d(it.second->fld.data(), it.second->fld_g);
+    #endif
+
     advec_u(fields.mt.at("u")->fld.data(),
             fields.mp.at("u")->fld.data(),
             fields.mp.at("v")->fld.data(),
@@ -947,13 +949,20 @@ void Advec_2i6<TF>::exec(Stats<TF>& stats)
             gd.kstart, gd.kend,
             gd.icells, gd.ijcells);
 
+    #ifdef USECUDA
+    fields.forward_field_device_3d(fields.mt.at("u")->fld_g, fields.mt.at("u")->fld.data());
+    fields.forward_field_device_3d(fields.mt.at("v")->fld_g, fields.mt.at("v")->fld.data());
+    fields.forward_field_device_3d(fields.mt.at("w")->fld_g, fields.mt.at("w")->fld.data());
+    for (auto& it : fields.st)
+        fields.forward_field_device_3d(it.second->fld_g, it.second->fld.data());
+    #endif
+
     stats.calc_tend(*fields.mt.at("u"), tend_name);
     stats.calc_tend(*fields.mt.at("v"), tend_name);
     stats.calc_tend(*fields.mt.at("w"), tend_name);
     for (auto it : fields.st)
         stats.calc_tend(*it.second, tend_name);
 }
-#endif
 
 template<typename TF>
 void Advec_2i6<TF>::get_advec_flux(

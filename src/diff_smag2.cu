@@ -39,12 +39,125 @@
 #include "fast_math.h"
 
 #include "diff_smag2.h"
+#include "diff_kernels.h"
+#include "diff_kernels_anisotropic.h"
 #include "diff_kernels.cuh"
 
 // Kernel Launcher
 #include "cuda_launcher.h"
 #include "diff_smag2_kl_kernels.cuh"
 #include "diff_kl_kernels.cuh"
+
+namespace
+{
+    template<typename TF>
+    void backward_tendencies_device(Fields<TF>& fields)
+    {
+        for (auto& it : fields.at)
+            fields.backward_field_device_3d(it.second->fld.data(), it.second->fld_g);
+    }
+
+    template<typename TF>
+    void forward_tendencies_device(Fields<TF>& fields)
+    {
+        for (auto& it : fields.at)
+            fields.forward_field_device_3d(it.second->fld_g, it.second->fld.data());
+    }
+
+    template<typename TF>
+    void forward_anisotropic_viscosity_device(Fields<TF>& fields)
+    {
+        fields.forward_field_device_3d(
+                fields.sd.at("evisc_h")->fld_g,
+                fields.sd.at("evisc_h")->fld.data());
+        fields.forward_field_device_3d(
+                fields.sd.at("evisc_v")->fld_g,
+                fields.sd.at("evisc_v")->fld.data());
+    }
+
+    template<typename TF>
+    void backward_anisotropic_viscosity_device(Fields<TF>& fields)
+    {
+        fields.backward_field_device_3d(
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_h")->fld_g);
+        fields.backward_field_device_3d(
+                fields.sd.at("evisc_v")->fld.data(),
+                fields.sd.at("evisc_v")->fld_g);
+    }
+
+    template<typename TF>
+    inline TF calc_l_mason_anisotropic(const TF mlen0, const TF z, const TF z0)
+    {
+        const TF n_mason = TF(2);
+        return std::pow(
+                TF(1.) / (TF(1.) / std::pow(mlen0, n_mason)
+                        + TF(1.) / std::pow(Constants::kappa<TF> * (z + z0), n_mason)),
+                TF(1.) / n_mason);
+    }
+
+    template<typename TF>
+    void calc_evisc_anisotropic(
+            TF* const restrict evisc_h,
+            TF* const restrict evisc_v,
+            const TF* const restrict N2,
+            const TF* const restrict bgradbot,
+            const TF* const restrict z,
+            const TF* const restrict z0m,
+            const TF mlen0_h, const TF mlen0_v,
+            const TF cs, const TF tPr,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart, const int kend,
+            const int icells, const int ijcells,
+            Boundary_cyclic<TF>& boundary_cyclic)
+    {
+        const int jj = icells;
+        const int kk = ijcells;
+
+        for (int j=jstart; j<jend; ++j)
+        {
+            #pragma ivdep
+            for (int i=istart; i<iend; ++i)
+            {
+                const int ij  = i + j*jj;
+                const int ijk = i + j*jj + kstart*kk;
+
+                TF RitPrratio = bgradbot[ij] / evisc_h[ijk] / tPr;
+                RitPrratio = std::min(RitPrratio, TF(1.-Constants::dsmall));
+
+                const TF mlen_v = calc_l_mason_anisotropic(cs*mlen0_v, z[kstart], z0m[ij]);
+                const TF mlen_h = calc_l_mason_anisotropic(cs*mlen0_h, z[kstart], z0m[ij]);
+                const TF strain_ritpr_fac = std::sqrt(evisc_h[ijk]) * std::sqrt(TF(1.)-RitPrratio);
+
+                evisc_v[ijk] = Fast_math::pow2(mlen_v) * strain_ritpr_fac;
+                evisc_h[ijk] = Fast_math::pow2(mlen_h) * strain_ritpr_fac;
+            }
+        }
+
+        for (int k=kstart+1; k<kend; ++k)
+            for (int j=jstart; j<jend; ++j)
+                #pragma ivdep
+                for (int i=istart; i<iend; ++i)
+                {
+                    const int ij  = i + j*jj;
+                    const int ijk = i + j*jj + k*kk;
+
+                    TF RitPrratio = N2[ijk] / evisc_h[ijk] / tPr;
+                    RitPrratio = std::min(RitPrratio, TF(1.-Constants::dsmall));
+
+                    const TF mlen_v = calc_l_mason_anisotropic(cs*mlen0_v, z[k], z0m[ij]);
+                    const TF mlen_h = calc_l_mason_anisotropic(cs*mlen0_h, z[k], z0m[ij]);
+                    const TF strain_ritpr_fac = std::sqrt(evisc_h[ijk]) * std::sqrt(TF(1.)-RitPrratio);
+
+                    evisc_v[ijk] = Fast_math::pow2(mlen_v) * strain_ritpr_fac;
+                    evisc_h[ijk] = Fast_math::pow2(mlen_h) * strain_ritpr_fac;
+                }
+
+        boundary_cyclic.exec(evisc_v);
+        boundary_cyclic.exec(evisc_h);
+    }
+}
 
 /* Calculate the mixing length (mlen) offline, and put on GPU */
 #ifdef USECUDA
@@ -74,6 +187,7 @@ void Diff_smag2<TF>::prepare_device(Boundary<TF>& boundary)
 template<typename TF>
 void Diff_smag2<TF>::clear_device()
 {
+    mlen_g.free();
 }
 #endif
 
@@ -83,6 +197,77 @@ void Diff_smag2<TF>::exec_viscosity(Stats<TF>&, Thermo<TF>& thermo)
 {
     namespace dk = Diff_kernels_g;
     auto& gd = grid.get_grid_data();
+
+    if (sw_anisotropic)
+    {
+        fields.backward_device();
+        boundary.backward_device(thermo);
+
+        if (boundary.get_switch() != "default")
+        {
+            const std::vector<TF>& dudz = boundary.get_dudz();
+            const std::vector<TF>& dvdz = boundary.get_dvdz();
+
+            Diff_kernels::calc_strain2<TF, Surface_model::Enabled>(
+                    fields.sd.at("evisc_h")->fld.data(),
+                    fields.mp.at("u")->fld.data(),
+                    fields.mp.at("v")->fld.data(),
+                    fields.mp.at("w")->fld.data(),
+                    dudz.data(),
+                    dvdz.data(),
+                    gd.z.data(),
+                    gd.dzi.data(),
+                    gd.dzhi.data(),
+                    TF(1.)/gd.dx, TF(1.)/gd.dy,
+                    gd.istart, gd.iend,
+                    gd.jstart, gd.jend,
+                    gd.kstart, gd.kend,
+                    gd.icells, gd.ijcells);
+        }
+        else
+        {
+            Diff_kernels::calc_strain2<TF, Surface_model::Disabled>(
+                    fields.sd.at("evisc_h")->fld.data(),
+                    fields.mp.at("u")->fld.data(),
+                    fields.mp.at("v")->fld.data(),
+                    fields.mp.at("w")->fld.data(),
+                    nullptr,
+                    nullptr,
+                    gd.z.data(),
+                    gd.dzi.data(),
+                    gd.dzhi.data(),
+                    TF(1.)/gd.dx, TF(1.)/gd.dy,
+                    gd.istart, gd.iend,
+                    gd.jstart, gd.jend,
+                    gd.kstart, gd.kend,
+                    gd.icells, gd.ijcells);
+        }
+
+        auto buoy_tmp = fields.get_tmp();
+        thermo.get_thermo_field(*buoy_tmp, "N2", false, false);
+
+        const std::vector<TF>& z0m = boundary.get_z0m();
+        const std::vector<TF>& dbdz = boundary.get_dbdz();
+
+        calc_evisc_anisotropic<TF>(
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_v")->fld.data(),
+                buoy_tmp->fld.data(),
+                dbdz.data(),
+                gd.z.data(),
+                z0m.data(),
+                mlen0_h, mlen0_v,
+                cs, tPr,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells,
+                boundary_cyclic);
+
+        fields.release_tmp(buoy_tmp);
+        forward_anisotropic_viscosity_device(fields);
+        return;
+    }
 
     // Grid layout struct for cuda launcher.
     Grid_layout grid_layout = {
@@ -232,6 +417,98 @@ void Diff_smag2<TF>::exec(Stats<TF>& stats)
 {
     auto& gd = grid.get_grid_data();
 
+    if (sw_anisotropic)
+    {
+        fields.backward_device();
+        backward_tendencies_device(fields);
+
+        Diff_kernels_anisotropic::diff_u<TF>(
+                fields.mt.at("u")->fld.data(),
+                fields.mp.at("u")->fld.data(),
+                fields.mp.at("v")->fld.data(),
+                fields.mp.at("w")->fld.data(),
+                gd.dzi.data(), gd.dzhi.data(),
+                TF(1.)/gd.dx, TF(1.)/gd.dy,
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_v")->fld.data(),
+                fields.mp.at("u")->flux_bot.data(),
+                fields.mp.at("u")->flux_top.data(),
+                fields.rhoref.data(),
+                fields.rhorefh.data(),
+                fields.visc,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+
+        Diff_kernels_anisotropic::diff_v<TF>(
+                fields.mt.at("v")->fld.data(),
+                fields.mp.at("u")->fld.data(),
+                fields.mp.at("v")->fld.data(),
+                fields.mp.at("w")->fld.data(),
+                gd.dzi.data(), gd.dzhi.data(),
+                TF(1.)/gd.dx, TF(1.)/gd.dy,
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_v")->fld.data(),
+                fields.mp.at("v")->flux_bot.data(),
+                fields.mp.at("v")->flux_top.data(),
+                fields.rhoref.data(),
+                fields.rhorefh.data(),
+                fields.visc,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+
+        Diff_kernels_anisotropic::diff_w<TF>(
+                fields.mt.at("w")->fld.data(),
+                fields.mp.at("u")->fld.data(),
+                fields.mp.at("v")->fld.data(),
+                fields.mp.at("w")->fld.data(),
+                gd.dzi.data(), gd.dzhi.data(),
+                TF(1.)/gd.dx, TF(1.)/gd.dy,
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_v")->fld.data(),
+                fields.rhoref.data(),
+                fields.rhorefh.data(),
+                fields.visc,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+
+        for (auto it : fields.st)
+        {
+            Diff_kernels_anisotropic::diff_c<TF>(
+                    it.second->fld.data(),
+                    fields.sp.at(it.first)->fld.data(),
+                    gd.dzi.data(), gd.dzhi.data(),
+                    TF(1.)/(gd.dx*gd.dx), TF(1.)/(gd.dy*gd.dy),
+                    fields.sd.at("evisc_h")->fld.data(),
+                    fields.sd.at("evisc_v")->fld.data(),
+                    fields.sp.at(it.first)->flux_bot.data(),
+                    fields.sp.at(it.first)->flux_top.data(),
+                    fields.rhoref.data(),
+                    fields.rhorefh.data(),
+                    tPr,
+                    fields.sp.at(it.first)->visc,
+                    gd.istart, gd.iend,
+                    gd.jstart, gd.jend,
+                    gd.kstart, gd.kend,
+                    gd.icells, gd.ijcells);
+        }
+
+        forward_tendencies_device(fields);
+
+        stats.calc_tend(*fields.mt.at("u"), tend_name);
+        stats.calc_tend(*fields.mt.at("v"), tend_name);
+        stats.calc_tend(*fields.mt.at("w"), tend_name);
+        for (auto it : fields.st)
+            stats.calc_tend(*it.second, tend_name);
+
+        return;
+    }
+
     // Grid layout struct for cuda launcher.
     Grid_layout grid_layout = {
             gd.istart, gd.iend,
@@ -344,6 +621,28 @@ unsigned long Diff_smag2<TF>::get_time_limit(unsigned long idt, double dt)
     namespace dk = Diff_kernels_g;
     auto& gd = grid.get_grid_data();
 
+    if (sw_anisotropic)
+    {
+        backward_anisotropic_viscosity_device(fields);
+
+        double dnmul = Diff_kernels_anisotropic::calc_dnmul<TF>(
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_v")->fld.data(),
+                gd.dzi.data(),
+                TF(1.)/(gd.dx*gd.dx),
+                TF(1.)/(gd.dy*gd.dy),
+                tPr,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+
+        master.max(&dnmul, 1);
+        dnmul = std::max(Constants::dsmall, dnmul);
+
+        return idt * dnmax / (dt * dnmul);
+    }
+
     const int blocki = gd.ithread_block;
     const int blockj = gd.jthread_block;
     const int gridi  = gd.imax/blocki + (gd.imax%blocki > 0);
@@ -390,6 +689,26 @@ double Diff_smag2<TF>::get_dn(double dt)
 {
     namespace dk = Diff_kernels_g;
     auto& gd = grid.get_grid_data();
+
+    if (sw_anisotropic)
+    {
+        backward_anisotropic_viscosity_device(fields);
+
+        double dnmul = Diff_kernels_anisotropic::calc_dnmul<TF>(
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_v")->fld.data(),
+                gd.dzi.data(),
+                TF(1.)/(gd.dx*gd.dx),
+                TF(1.)/(gd.dy*gd.dy),
+                tPr,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+
+        master.max(&dnmul, 1);
+        return dnmul*dt;
+    }
 
     const int blocki = gd.ithread_block;
     const int blockj = gd.jthread_block;

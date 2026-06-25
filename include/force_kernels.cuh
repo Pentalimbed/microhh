@@ -134,6 +134,70 @@ namespace Force_kernels
 
 
     template<typename TF>
+    struct coriolis_2nd_geo_3d_g
+    {
+        DEFINE_GRID_KERNEL("force::coriolis_2nd_geo_3d", 0)
+
+        template <typename Level>
+        CUDA_DEVICE
+        void operator()(
+                Grid_layout g, const int i, const int j, const int k, const Level level,
+                TF* const __restrict__ ut,
+                TF* const __restrict__ vt,
+                const TF* const __restrict__ u,
+                const TF* const __restrict__ v,
+                const TF* const __restrict__ ug,
+                const TF* const __restrict__ vg,
+                const TF* const __restrict__ fc_2d,
+                const TF ugrid,
+                const TF vgrid)
+        {
+            const int ii = 1;
+            const int jj = g.jstride;
+            const int ij = g(i, j, 0);
+            const int ijk = g(i, j, k);
+
+            const TF fc_u = TF(0.5)*(fc_2d[ij-ii] + fc_2d[ij]);
+            const TF fc_v = TF(0.5)*(fc_2d[ij-jj] + fc_2d[ij]);
+
+            ut[ijk] += fc_u * (TF(0.25)*(v[ijk-ii] + v[ijk] + v[ijk-ii+jj] + v[ijk+jj]) + vgrid - vg[ijk]);
+            vt[ijk] -= fc_v * (TF(0.25)*(u[ijk-jj] + u[ijk] + u[ijk+ii-jj] + u[ijk+ii]) + ugrid - ug[ijk]);
+        }
+    };
+
+
+    template<typename TF>
+    struct rotation_2d_g
+    {
+        DEFINE_GRID_KERNEL("force::rotation_2d", 0)
+
+        template <typename Level>
+        CUDA_DEVICE
+        void operator()(
+                Grid_layout g, const int i, const int j, const int k, const Level level,
+                TF* const __restrict__ ut,
+                TF* const __restrict__ vt,
+                const TF* const __restrict__ u,
+                const TF* const __restrict__ v,
+                const TF* const __restrict__ fc_2d,
+                const TF ugrid,
+                const TF vgrid)
+        {
+            const int ii = 1;
+            const int jj = g.jstride;
+            const int ij = g(i, j, 0);
+            const int ijk = g(i, j, k);
+
+            const TF fc_u = TF(0.5)*(fc_2d[ij-ii] + fc_2d[ij]);
+            const TF fc_v = TF(0.5)*(fc_2d[ij-jj] + fc_2d[ij]);
+
+            ut[ijk] +=  fc_u * (TF(0.25)*(v[ijk-ii] + v[ijk] + v[ijk-ii+jj] + v[ijk+jj]) + vgrid);
+            vt[ijk] += -fc_v * (TF(0.25)*(u[ijk-jj] + u[ijk] + u[ijk+ii-jj] + u[ijk+ii]) + ugrid);
+        }
+    };
+
+
+    template<typename TF>
     struct add_profile_g
     {
         DEFINE_GRID_KERNEL("force::add_profile", 0)

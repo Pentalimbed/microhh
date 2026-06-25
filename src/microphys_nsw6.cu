@@ -150,9 +150,12 @@ namespace
             const TF* const __restrict__ qr, const TF* const __restrict__ qs, const TF* const __restrict__ qg,
             const TF* const __restrict__ qt, const TF* const __restrict__ thl,
             const TF* const __restrict__ ql, const TF* const __restrict__ qi,
-            const TF* const __restrict__ rho, const TF* const __restrict__ exner, const TF* const __restrict__ p,
+            const TF* const __restrict__ rho,
+            const TF* const __restrict__ exner_basestate,
+            const TF* const __restrict__ p,
             const TF* const __restrict__ dzi, const TF* const __restrict__ dzhi,
             const TF Nc0, const TF dt,
+            const bool pressure_is_3d,
             const int istart, const int jstart, const int kstart,
             const int iend, const int jend, const int kend,
             const int jj, const int kk, TF* const __restrict__ temp_array)
@@ -166,6 +169,15 @@ namespace
         for (int k=kstart; k<kend; ++k)
         {
             const TF rho0_rho_sqrt = pow(rho[kstart]/rho[k], TF(0.5));
+            TF exn_loc = TF(0.);
+            TF p_loc = TF(0.);
+
+            if (!pressure_is_3d)
+            {
+                p_loc = p[k];
+                exn_loc = exner_basestate[k];
+            }
+
             // Setup the relevant variables for each z slice
 
             // Part of Tomita Eq. 29
@@ -216,8 +228,14 @@ namespace
             {
                 const int ijk = i + j*jj + k*kk;
 
+                if (pressure_is_3d)
+                {
+                    p_loc = p[ijk];
+                    exn_loc = exner(p_loc);
+                }
+
                 // Compute the T out of the known values of ql and qi, this saves memory and sat_adjust.
-                const TF T = exner[k]*thl[ijk] + Lv<TF>/cp<TF>*ql[ijk] + Ls<TF>/cp<TF>*qi[ijk];
+                const TF T = exn_loc*thl[ijk] + Lv<TF>/cp<TF>*ql[ijk] + Ls<TF>/cp<TF>*qi[ijk];
                 const TF qv = qt[ijk] - ql[ijk] - qi[ijk];
 
                 // Flag the sign of the absolute temperature.
@@ -391,8 +409,8 @@ namespace
                     Ls<TF> / (K_a<TF> * T) * (Ls<TF> / (Rv<TF> * T) - TF(1.))
                     + Rv<TF>*T / (K_d<TF> * esat_ice(T)) );
 
-                const TF S_w = (qt[ijk] - ql[ijk] - qi[ijk]) / qsat_liq(p[k], T);
-                const TF S_i = (qt[ijk] - ql[ijk] - qi[ijk]) / qsat_ice(p[k], T);
+                const TF S_w = (qt[ijk] - ql[ijk] - qi[ijk]) / qsat_liq(p_loc, T);
+                const TF S_i = (qt[ijk] - ql[ijk] - qi[ijk]) / qsat_ice(p_loc, T);
 
                 // Tomita Eq. 63
                 const TF delta_3 = TF(S_i <= TF(1.)); // Subsaturated, then delta_3 = 1.
@@ -598,37 +616,37 @@ namespace
                 // Loss from cloud.
                 qtt[ijk] -= cloud_to_rain;
                 qrt[ijk] += cloud_to_rain;
-                thlt[ijk] += Lv<TF> / (cp<TF> * exner[k]) * cloud_to_rain;
+                thlt[ijk] += Lv<TF> / (cp<TF> * exn_loc) * cloud_to_rain;
 
                 qtt[ijk] -= cloud_to_graupel;
                 qgt[ijk] += cloud_to_graupel;
-                thlt[ijk] += Ls<TF> / (cp<TF> * exner[k]) * cloud_to_graupel;
+                thlt[ijk] += Ls<TF> / (cp<TF> * exn_loc) * cloud_to_graupel;
 
                 qtt[ijk] -= cloud_to_snow;
                 qst[ijk] += cloud_to_snow;
-                thlt[ijk] += Ls<TF> / (cp<TF> * exner[k]) * cloud_to_snow;
+                thlt[ijk] += Ls<TF> / (cp<TF> * exn_loc) * cloud_to_snow;
 
                 // Loss from rain.
                 qrt[ijk] -= rain_to_vapor;
                 qtt[ijk] += rain_to_vapor;
-                thlt[ijk] -= Lv<TF> / (cp<TF> * exner[k]) * rain_to_vapor;
+                thlt[ijk] -= Lv<TF> / (cp<TF> * exn_loc) * rain_to_vapor;
 
                 qrt[ijk] -= rain_to_graupel;
                 qgt[ijk] += rain_to_graupel;
-                thlt[ijk] += Lf<TF> / (cp<TF> * exner[k]) * rain_to_graupel;
+                thlt[ijk] += Lf<TF> / (cp<TF> * exn_loc) * rain_to_graupel;
 
                 qrt[ijk] -= rain_to_snow;
                 qst[ijk] += rain_to_snow;
-                thlt[ijk] += Lf<TF> / (cp<TF> * exner[k]) * rain_to_snow;
+                thlt[ijk] += Lf<TF> / (cp<TF> * exn_loc) * rain_to_snow;
 
                 // Loss from ice.
                 qtt[ijk] -= ice_to_snow;
                 qst[ijk] += ice_to_snow;
-                thlt[ijk] += Ls<TF> / (cp<TF> * exner[k]) * ice_to_snow;
+                thlt[ijk] += Ls<TF> / (cp<TF> * exn_loc) * ice_to_snow;
 
                 qtt[ijk] -= ice_to_graupel;
                 qgt[ijk] += ice_to_graupel;
-                thlt[ijk] += Ls<TF> / (cp<TF> * exner[k]) * ice_to_graupel;
+                thlt[ijk] += Ls<TF> / (cp<TF> * exn_loc) * ice_to_graupel;
 
                 // Loss from snow.
                 qst[ijk] -= snow_to_graupel;
@@ -636,20 +654,20 @@ namespace
 
                 qst[ijk] -= snow_to_vapor;
                 qtt[ijk] += snow_to_vapor;
-                thlt[ijk] -= Ls<TF> / (cp<TF> * exner[k]) * snow_to_vapor;
+                thlt[ijk] -= Ls<TF> / (cp<TF> * exn_loc) * snow_to_vapor;
 
                 qst[ijk] -= snow_to_rain;
                 qrt[ijk] += snow_to_rain;
-                thlt[ijk] -= Lf<TF> / (cp<TF> * exner[k]) * snow_to_rain;
+                thlt[ijk] -= Lf<TF> / (cp<TF> * exn_loc) * snow_to_rain;
 
                 // Loss from graupel.
                 qgt[ijk] -= graupel_to_rain;
                 qrt[ijk] += graupel_to_rain;
-                thlt[ijk] -= Lf<TF> / (cp<TF> * exner[k]) * graupel_to_rain;
+                thlt[ijk] -= Lf<TF> / (cp<TF> * exn_loc) * graupel_to_rain;
 
                 qgt[ijk] -= graupel_to_vapor;
                 qtt[ijk] += graupel_to_vapor;
-                thlt[ijk] -= Ls<TF> / (cp<TF> * exner[k]) * graupel_to_vapor;
+                thlt[ijk] -= Ls<TF> / (cp<TF> * exn_loc) * graupel_to_vapor;
             }
         } // end for loop over k
     } // end conversion function
@@ -719,6 +737,33 @@ namespace sedimentation_nsw6
             rr_out[ij] = rr_in[ij] + rs_in[ij] + rg_in[ij];
         }
     }
+
+    template<typename TF> __global__
+    void calc_path_g(
+            TF* const __restrict__ path,
+            const TF* const __restrict__ fld,
+            const TF* const __restrict__ rhoref,
+            const TF* const __restrict__ dz,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart, const int kend,
+            const int icells, const int ijcells)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            const int ij = i + j*icells;
+            path[ij] = TF(0);
+
+            for (int k=kstart; k<kend; ++k)
+            {
+                const int ijk = ij + k*ijcells;
+                path[ij] += rhoref[k] * fld[ijk] * dz[k];
+            }
+        }
+    }
 }
 
 #ifdef USECUDA
@@ -744,8 +789,13 @@ void Microphys_nsw6<TF>::exec(Thermo<TF>& thermo, const double dt, Stats<TF>& st
     thermo.get_thermo_field_g(*ql, "ql", false);
     thermo.get_thermo_field_g(*qi, "qi", false);
 
-    TF* p     = thermo.get_basestate_fld_g("pref");
-    TF* exner = thermo.get_basestate_fld_g("exner");
+    const bool pressure_is_3d = thermo.pressure_is_3d();
+    TF* p = pressure_is_3d
+          ? thermo.get_basestate_fld_g("phydro_3d")
+          : thermo.get_basestate_fld_g("pref");
+    TF* exner_basestate = pressure_is_3d
+                         ? nullptr
+                         : thermo.get_basestate_fld_g("exner");
 
     auto temp_g = fields.get_tmp_g();
 
@@ -755,9 +805,10 @@ void Microphys_nsw6<TF>::exec(Thermo<TF>& thermo, const double dt, Stats<TF>& st
            fields.sp.at("qr")->fld_g, fields.sp.at("qs")->fld_g, fields.sp.at("qg")->fld_g,
            fields.sp.at("qt")->fld_g, fields.sp.at("thl")->fld_g,
            ql->fld_g, qi->fld_g,
-           fields.rhoref_g, exner, p,
+           fields.rhoref_g, exner_basestate, p,
            gd.dzi_g, gd.dzhi_g,
            this->Nc0, TF(dt),
+           pressure_is_3d,
            gd.istart, gd.jstart, gd.kstart,
            gd.iend, gd.jend, gd.kend,
            gd.icells, gd.ijcells, temp_g->fld_g);
@@ -978,10 +1029,54 @@ void Microphys_nsw6<TF>::get_surface_rain_rate_g(
 template<typename TF>
 void Microphys_nsw6<TF>::exec_column(Column<TF>& column)
 {
+    auto& gd = grid.get_grid_data();
+
+    const int blocki = gd.ithread_block;
+    const int blockj = gd.jthread_block;
+    const int gridi  = gd.imax/blocki + (gd.imax%blocki > 0);
+    const int gridj  = gd.jmax/blockj + (gd.jmax%blockj > 0);
+
+    dim3 gridGPU (gridi, gridj);
+    dim3 blockGPU(blocki, blockj);
+
     const TF no_offset = 0.;
     column.calc_time_series("rr", rr_bot_g, no_offset);
     column.calc_time_series("rs", rs_bot_g, no_offset);
     column.calc_time_series("rg", rg_bot_g, no_offset);
+
+    auto path = fields.get_tmp_g();
+
+    sedimentation_nsw6::calc_path_g<TF><<<gridGPU, blockGPU>>>(
+            path->fld_bot_g, fields.sp.at("qr")->fld_g,
+            fields.rhoref_g, gd.dz_g,
+            gd.istart, gd.iend,
+            gd.jstart, gd.jend,
+            gd.kstart, gd.kend,
+            gd.icells, gd.ijcells);
+    cuda_check_error();
+    column.calc_time_series("qr_path", path->fld_bot_g, no_offset);
+
+    sedimentation_nsw6::calc_path_g<TF><<<gridGPU, blockGPU>>>(
+            path->fld_bot_g, fields.sp.at("qs")->fld_g,
+            fields.rhoref_g, gd.dz_g,
+            gd.istart, gd.iend,
+            gd.jstart, gd.jend,
+            gd.kstart, gd.kend,
+            gd.icells, gd.ijcells);
+    cuda_check_error();
+    column.calc_time_series("qs_path", path->fld_bot_g, no_offset);
+
+    sedimentation_nsw6::calc_path_g<TF><<<gridGPU, blockGPU>>>(
+            path->fld_bot_g, fields.sp.at("qg")->fld_g,
+            fields.rhoref_g, gd.dz_g,
+            gd.istart, gd.iend,
+            gd.jstart, gd.jend,
+            gd.kstart, gd.kend,
+            gd.icells, gd.ijcells);
+    cuda_check_error();
+    column.calc_time_series("qg_path", path->fld_bot_g, no_offset);
+
+    fields.release_tmp_g(path);
 }
 
 template<typename TF>

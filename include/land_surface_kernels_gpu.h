@@ -28,11 +28,13 @@
 #include "boundary_surface_kernels_gpu.h"
 #include "thermo_moist_functions.h"
 #include "monin_obukhov.h"
+#include "fast_math.h"
 
 namespace Land_surface_kernels_g
 {
     namespace bsk = Boundary_surface_kernels_g;
     namespace most = Monin_obukhov;
+    namespace fm = Fast_math;
 
     template<typename TF> __global__
     void calc_tile_fractions_g(
@@ -268,6 +270,38 @@ namespace Land_surface_kernels_g
     }
 
     template<typename TF> __global__
+    void calc_z0_charnock_g(
+            TF* const __restrict__ z0m,
+            TF* const __restrict__ z0h,
+            const TF* const __restrict__ ustar,
+            const int* const __restrict__ water_mask,
+            const TF alpha_m, const TF alpha_ch, const TF alpha_h,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int icells)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        const TF visc = TF(1.5e-5);
+        const TF gi = TF(1)/Constants::grav<TF>;
+        const TF min_ustar = TF(1e-3);
+
+        if (i < iend && j < jend)
+        {
+            const int ij  = i + j*icells;
+
+            if (water_mask[ij])
+            {
+                const TF ustar_lim = fmax(ustar[ij], min_ustar);
+
+                z0m[ij] = alpha_m * visc/ustar_lim + alpha_ch * fm::pow2(ustar_lim) * gi;
+                z0h[ij] = alpha_h * visc/ustar_lim;
+            }
+        }
+    }
+
+    template<typename TF, bool pressure_is_3d> __global__
     void calc_fluxes_g(
             TF* const __restrict__ H,
             TF* const __restrict__ LE,
@@ -292,7 +326,7 @@ namespace Land_surface_kernels_g
             const TF* const __restrict__ b,
             const TF* const __restrict__ b_bot,
             const TF* const __restrict__ rhorefh,
-            const TF* const __restrict__ exnerh,
+            const TF* const __restrict__ prefh,
             const TF db_ref,
             const TF emis_sfc,
             const TF dt,
@@ -305,7 +339,6 @@ namespace Land_surface_kernels_g
         const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
         const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
 
-        const TF exner_bot = exnerh[kstart];
         const TF rho_bot = rhorefh[kstart];
 
         if (i < iend && j < jend)
@@ -313,6 +346,8 @@ namespace Land_surface_kernels_g
             const int ij    = i + j*icells;
             const int ijk   = ij + kstart*ijcells;
             const int ijk_s = ij + (kend_soil-1)*ijcells;
+            const TF pref_bot = pressure_is_3d ? prefh[ijk] : prefh[kstart];
+            const TF exner_bot = Thermo_moist_functions::exner(pref_bot);
 
             const TF T_bot = thl_bot[ij] * exner_bot;
 
@@ -562,7 +597,7 @@ template<typename TF> __global__
 //            }
 //    }
 
-    template<typename TF> __global__
+    template<typename TF, bool pressure_is_3d> __global__
     void set_water_tiles(
             TF* const __restrict__ c_veg,
             TF* const __restrict__ c_soil,
@@ -590,7 +625,6 @@ template<typename TF> __global__
             const TF* const __restrict__ ra,
             const TF* const __restrict__ rhoh,
             const TF* const __restrict__ prefh,
-            const TF* const __restrict__ exnerh,
             const int istart, const int iend,
             const int jstart, const int jend,
             const int kstart,
@@ -609,8 +643,11 @@ template<typename TF> __global__
 
             if (water_mask[ij])
             {
-                thl_bot_wet[ij] = t_bot_water[ij] / exnerh[kstart];
-                qt_bot_wet[ij]  = Thermo_moist_functions::qsat(prefh[kstart], t_bot_water[ij]);
+                const TF pref_bot = pressure_is_3d ? prefh[ijk] : prefh[kstart];
+                const TF exner_bot = Thermo_moist_functions::exner(pref_bot);
+
+                thl_bot_wet[ij] = t_bot_water[ij] / exner_bot;
+                qt_bot_wet[ij]  = Thermo_moist_functions::qsat(pref_bot, t_bot_water[ij]);
 
                 c_veg[ij]  = TF(0);
                 c_soil[ij] = TF(0);
@@ -679,6 +716,55 @@ template<typename TF> __global__
         {
             const int ij = i + j*icells;
             fld_scaled[ij] = fld[ij] * tile_frac[ij];
+        }
+    }
+
+    template<typename TF, bool pressure_is_3d> __global__
+    void diagnose_1_5m_10m_MO_g(
+            TF* const __restrict__ t1_5m,
+            TF* const __restrict__ q1_5m,
+            TF* const __restrict__ u10m,
+            TF* const __restrict__ v10m,
+            TF* const __restrict__ U10m,
+            const TF* const __restrict__ thl_bot,
+            const TF* const __restrict__ qt_bot,
+            const TF* const __restrict__ thl_fluxbot,
+            const TF* const __restrict__ qt_fluxbot,
+            const TF* const __restrict__ u_fluxbot,
+            const TF* const __restrict__ v_fluxbot,
+            const TF* const __restrict__ ustar,
+            const TF* const __restrict__ obuk,
+            const TF* const __restrict__ z0m,
+            const TF* const __restrict__ z0h,
+            const TF* const __restrict__ phydroh,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart,
+            const int icells, const int ijcells)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            const int ij = i + j*icells;
+            const int ijk = ij + kstart*ijcells;
+
+            const TF z_1_5m = TF(1.5);
+            const TF z_10m = TF(10);
+
+            const TF p_bot = pressure_is_3d ? phydroh[ijk] : phydroh[kstart];
+            const TF exn_bot = Thermo_moist_functions::exner(p_bot);
+
+            const TF fac1 = TF(1) / (ustar[ij] * most::fh(z_1_5m, z0h[ij], obuk[ij]));
+            const TF fac2 = TF(1) / (ustar[ij] * most::fm(z_10m,  z0m[ij], obuk[ij]));
+
+            t1_5m[ij] = thl_bot[ij] * exn_bot - thl_fluxbot[ij] * fac1;
+            q1_5m[ij] = qt_bot[ij]            - qt_fluxbot[ij]  * fac1;
+
+            u10m[ij] = -u_fluxbot[ij] * fac2;
+            v10m[ij] = -v_fluxbot[ij] * fac2;
+            U10m[ij] = pow(fm::pow2(u10m[ij]) + fm::pow2(v10m[ij]), TF(0.5));
         }
     }
 

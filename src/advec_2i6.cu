@@ -32,31 +32,4 @@
 #include "cuda_launcher.h"
 
 
-#ifdef USECUDA
-template<typename TF>
-unsigned long Advec_2i6<TF>::get_time_limit(unsigned long idt, double dt)
-{
-    throw std::runtime_error("advec_2i6 is not (yet) implemented on the GPU.");
-}
-
-
-template<typename TF>
-double Advec_2i6<TF>::get_cfl(const double dt)
-{
-    throw std::runtime_error("advec_2i6 is not (yet) implemented on the GPU.");
-}
-
-
-template<typename TF>
-void Advec_2i6<TF>::exec(Stats<TF>& stats)
-{
-    throw std::runtime_error("advec_2i6 is not (yet) implemented on the GPU.");
-}
-#endif
-
-
-#ifdef FLOAT_SINGLE
-template class Advec_2i6<float>;
-#else
-template class Advec_2i6<double>;
-#endif
+// The CUDA build uses the synchronized host fallback in advec_2i6.cxx.

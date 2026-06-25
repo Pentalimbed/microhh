@@ -1315,6 +1315,29 @@ void Boundary_lateral<TF>::set_ghost_cells(
     auto& gd = grid.get_grid_data();
     auto& md = master.get_MPI_data();
 
+    #ifdef USECUDA
+    std::vector<std::string> cuda_sync_fields;
+    auto add_cuda_sync_field = [&](const std::string& name)
+    {
+        if (std::find(cuda_sync_fields.begin(), cuda_sync_fields.end(), name) == cuda_sync_fields.end())
+            cuda_sync_fields.push_back(name);
+    };
+
+    if (sw_openbc_uv)
+    {
+        add_cuda_sync_field("u");
+        add_cuda_sync_field("v");
+        add_cuda_sync_field("w");
+    }
+    if (sw_openbc_w || sw_neumann_w)
+        add_cuda_sync_field("w");
+    for (auto& fld : slist)
+        add_cuda_sync_field(fld);
+
+    for (auto& fld : cuda_sync_fields)
+        fields.backward_field_device_3d(fields.ap.at(fld)->fld.data(), fields.ap.at(fld)->fld_g);
+    #endif
+
     auto dump_vector = [&](
             std::vector<TF>& fld,
             const std::string& name)
@@ -1442,6 +1465,11 @@ void Boundary_lateral<TF>::set_ghost_cells(
     //dump_vector(fields.ap.at("thl")->fld, "thl");
     //dump_vector(fields.ap.at("qt")->fld, "qt");
 
+    #ifdef USECUDA
+    for (auto& fld : cuda_sync_fields)
+        fields.forward_field_device_3d(fields.ap.at(fld)->fld_g, fields.ap.at(fld)->fld.data());
+    #endif
+
     //throw 1;
 }
 
@@ -1455,6 +1483,28 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
 
     auto& gd = grid.get_grid_data();
     auto& md = master.get_MPI_data();
+
+    #ifdef USECUDA
+    if (sw_openbc_uv)
+    {
+        fields.backward_field_device_3d(fields.mp.at("u")->fld.data(), fields.mp.at("u")->fld_g);
+        fields.backward_field_device_3d(fields.mp.at("v")->fld.data(), fields.mp.at("v")->fld_g);
+        fields.backward_field_device_3d(fields.mt.at("u")->fld.data(), fields.mt.at("u")->fld_g);
+        fields.backward_field_device_3d(fields.mt.at("v")->fld.data(), fields.mt.at("v")->fld_g);
+    }
+
+    if (sw_openbc_w)
+    {
+        fields.backward_field_device_3d(fields.mp.at("w")->fld.data(), fields.mp.at("w")->fld_g);
+        fields.backward_field_device_3d(fields.mt.at("w")->fld.data(), fields.mt.at("w")->fld_g);
+    }
+
+    for (auto& fld : slist)
+    {
+        fields.backward_field_device_3d(fields.ap.at(fld)->fld.data(), fields.ap.at(fld)->fld_g);
+        fields.backward_field_device_3d(fields.at.at(fld)->fld.data(), fields.at.at(fld)->fld_g);
+    }
+    #endif
 
     auto sponge_layer_wrapper = [&]<Lbc_location location, bool sw_recycle>(
             std::map<std::string, std::vector<TF>>& lbc_map,
@@ -1547,6 +1597,11 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
         if (md.mpicoordx == md.npx-1)
             sponge_layer_wrapper.template operator()<Lbc_location::East, false>(lbc_e, "v");
 
+        #ifdef USECUDA
+        fields.forward_field_device_3d(fields.mt.at("u")->fld_g, fields.mt.at("u")->fld.data());
+        fields.forward_field_device_3d(fields.mt.at("v")->fld_g, fields.mt.at("v")->fld.data());
+        #endif
+
         stats.calc_tend(*fields.mt.at("u"), tend_name);
         stats.calc_tend(*fields.mt.at("v"), tend_name);
     }
@@ -1561,6 +1616,10 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
             sponge_layer_wrapper.template operator()<Lbc_location::South, false>(lbc_s, "w");
         if (md.mpicoordy == md.npy-1)
             sponge_layer_wrapper.template operator()<Lbc_location::North, false>(lbc_n, "w");
+
+        #ifdef USECUDA
+        fields.forward_field_device_3d(fields.mt.at("w")->fld_g, fields.mt.at("w")->fld.data());
+        #endif
 
         stats.calc_tend(*fields.mt.at("w"), tend_name);
     }
@@ -1597,6 +1656,10 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
             else
                 sponge_layer_wrapper.template operator()<Lbc_location::North, false>(lbc_n, fld);
         }
+
+        #ifdef USECUDA
+        fields.forward_field_device_3d(fields.at.at(fld)->fld_g, fields.at.at(fld)->fld.data());
+        #endif
 
         stats.calc_tend(*fields.at.at(fld), tend_name);
     }

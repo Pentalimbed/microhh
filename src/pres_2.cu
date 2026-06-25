@@ -221,6 +221,9 @@ namespace
 template<typename TF>
 void Pres_2<TF>::prepare_device()
 {
+    if (sw_openbc)
+        return;
+
     auto& gd = grid.get_grid_data();
 
     const int kmemsize = gd.kmax*sizeof(TF);
@@ -247,12 +250,59 @@ void Pres_2<TF>::prepare_device()
 template<typename TF>
 void Pres_2<TF>::clear_device()
 {
+    bmati_g.free();
+    bmatj_g.free();
+    a_g.free();
+    c_g.free();
+    work2d_g.free();
 }
 
 template<typename TF>
 void Pres_2<TF>::exec(double dt, Stats<TF>& stats)
 {
     auto& gd = grid.get_grid_data();
+
+    if (sw_openbc)
+    {
+        fields.backward_field_device_3d(fields.mp.at("u")->fld.data(), fields.mp.at("u")->fld_g);
+        fields.backward_field_device_3d(fields.mp.at("v")->fld.data(), fields.mp.at("v")->fld_g);
+        fields.backward_field_device_3d(fields.mp.at("w")->fld.data(), fields.mp.at("w")->fld_g);
+        fields.backward_field_device_3d(fields.mt.at("u")->fld.data(), fields.mt.at("u")->fld_g);
+        fields.backward_field_device_3d(fields.mt.at("v")->fld.data(), fields.mt.at("v")->fld_g);
+        fields.backward_field_device_3d(fields.mt.at("w")->fld.data(), fields.mt.at("w")->fld_g);
+
+        // create the input for the pressure solver
+        input(fields.sd.at("p")->fld.data(),
+              fields.mp.at("u")->fld.data(), fields.mp.at("v")->fld.data(), fields.mp.at("w")->fld.data(),
+              fields.mt.at("u")->fld.data(), fields.mt.at("v")->fld.data(), fields.mt.at("w")->fld.data(),
+              gd.dzi.data(), fields.rhoref.data(), fields.rhorefh.data(),
+              dt);
+
+        // solve the system
+        auto tmp1 = fields.get_tmp();
+        auto tmp2 = fields.get_tmp();
+
+        solve(fields.sd.at("p")->fld.data(), tmp1->fld.data(), tmp2->fld.data(),
+              gd.dz.data(), fields.rhoref.data());
+
+        fields.release_tmp(tmp1);
+        fields.release_tmp(tmp2);
+
+        // get the pressure tendencies from the pressure field
+        output(fields.mt.at("u")->fld.data(), fields.mt.at("v")->fld.data(), fields.mt.at("w")->fld.data(),
+               fields.sd.at("p")->fld.data(), gd.dzhi.data());
+
+        fields.forward_field_device_3d(fields.sd.at("p")->fld_g, fields.sd.at("p")->fld.data());
+        fields.forward_field_device_3d(fields.mt.at("u")->fld_g, fields.mt.at("u")->fld.data());
+        fields.forward_field_device_3d(fields.mt.at("v")->fld_g, fields.mt.at("v")->fld.data());
+        fields.forward_field_device_3d(fields.mt.at("w")->fld_g, fields.mt.at("w")->fld.data());
+
+        stats.calc_tend(*fields.mt.at("u"), tend_name);
+        stats.calc_tend(*fields.mt.at("v"), tend_name);
+        stats.calc_tend(*fields.mt.at("w"), tend_name);
+
+        return;
+    }
 
     // Grid layout for KL/CL launches over interior, including ghost cells.
     Grid_layout grid_layout_int = {
