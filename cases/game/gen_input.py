@@ -600,8 +600,8 @@ if __name__ == '__main__':
     itot = 600
     jtot = 600
 
-    xsize = 90000
-    ysize = 90000
+    xsize = 9000
+    ysize = 9000
 
     # Create input files.
     create_case_input(
