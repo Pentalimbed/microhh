@@ -9,7 +9,7 @@ python era5_openbc_input.py --domain=0
 
 cd ./dom0
 
-mpiexec -n $nproc ./microhh init era5_openbc
+./microhh init era5_openbc
 
 find . -maxdepth 1 -type f -name '*_overwrite*' | while read -r file; do
     newname="${file/_overwrite/}"
@@ -17,7 +17,7 @@ find . -maxdepth 1 -type f -name '*_overwrite*' | while read -r file; do
     mv "$file" "$newname"
 done
 
-mpiexec -n $nproc ./microhh run era5_openbc
+./microhh run era5_openbc
 
 # python cross_to_nc.py -n 12
 

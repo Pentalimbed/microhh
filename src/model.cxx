@@ -664,6 +664,7 @@ void Model<TF>::prepare_gpu()
     buffer   ->prepare_device();
     thermo   ->prepare_device();
     boundary ->prepare_device(*thermo);
+    lbc      ->prepare_device();
     diff     ->prepare_device(*boundary);
     force    ->prepare_device();
     ib       ->prepare_device();
@@ -684,6 +685,7 @@ void Model<TF>::clear_gpu()
     fields   ->clear_device();
     thermo   ->clear_device();
     boundary ->clear_device(*thermo);
+    lbc      ->clear_device();
     diff     ->clear_device();
     force    ->clear_device();
     ib       ->clear_device();

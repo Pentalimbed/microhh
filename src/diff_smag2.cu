@@ -53,6 +53,11 @@ void Diff_smag2<TF>::prepare_device(Boundary<TF>& boundary)
 {
     auto& gd = grid.get_grid_data();
 
+    // Anisotropic eddy viscosity is not (yet) ported to the GPU. Throw a clear
+    // error rather than silently running the CPU code on stale host data.
+    if (sw_anisotropic)
+        throw std::runtime_error("Anisotropic eddy viscosity (\"swanisotropic\") is not (yet) implemented on the GPU...");
+
     std::vector<TF> mlen(gd.kcells);
 
     if (boundary.get_switch() == "default")

@@ -42,6 +42,13 @@ void Buffer<TF>::prepare_device()
 
     if (swbuffer)
     {
+        // These buffer sub-features are not (yet) ported to the GPU. Throw a clear
+        // error rather than silently producing wrong results on stale host data.
+        if (swbuffer_3d)
+            throw std::runtime_error("3D buffer (\"swbuffer_3d\") is not (yet) implemented on the GPU...");
+        if (swupdate_local)
+            throw std::runtime_error("Local-mean buffer (\"swupdate_local\") is not (yet) implemented on the GPU...");
+
         const int nmemsize = gd.kcells*sizeof(TF);
 
         // Allocate the buffer arrays at GPU.
@@ -168,6 +175,17 @@ void Buffer<TF>::exec(Stats<TF>& stats)
         for (auto it : fields.st)
             stats.calc_tend(*it.second, tend_name);
     }
+}
+
+template <typename TF>
+void Buffer<TF>::update_time_dependent(Timeloop<TF>& timeloop)
+{
+    // The time-dependent 3D buffer is only active when `swbuffer_3d && swtimedep_buffer_3d`,
+    // and that combination is rejected in `prepare_device()` on the GPU. Nothing to do here.
+    if (!(swbuffer_3d && swtimedep_buffer_3d))
+        return;
+
+    throw std::runtime_error("Time-dependent 3D buffer is not (yet) implemented on the GPU...");
 }
 #endif
 

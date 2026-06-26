@@ -57,7 +57,7 @@ Settings
 """
 float_type = np.float32
 
-start_date = datetime(year=2014, month=11, day=15, hour=12)
+start_date = datetime(year=2014, month=11, day=15, hour=10)
 end_date   = datetime(year=2014, month=11, day=15, hour=15)
 
 # All domains are put in a sub-folder `work_dir/domX`.
@@ -87,7 +87,7 @@ NOTE: vertical grid definition in (LS)2D is not identical to MicroHH's grid.
       matches the one from MicroHH, otherwise the initial fields won't be divergence free.
 """
 # _g = ls2d.grid.Grid_linear_stretched(kmax=128, dz0=20, alpha=0.01)
-_g = ls2d.grid.Grid_equidist(kmax=300, dz0=15)
+_g = ls2d.grid.Grid_equidist(kmax=400, dz0=12)
 gd = calc_vertical_grid_2nd(_g.z, _g.zsize)
 
 zstart_buffer = 0.75 * gd['zsize']
@@ -98,10 +98,10 @@ Define projection used for LES coordinates (m) to real world (lat/lon) transform
 """
 # Outer domain, nested in ERA5.
 dom0 = Domain(
-    xsize=25600,
-    ysize=25600,
-    itot=512,
-    jtot=512,
+    xsize=12000,
+    ysize=12000,
+    itot=400,
+    jtot=400,
     n_ghost=3,
     n_sponge=5,
     lbc_freq=3600,                  # Always 3600 for ERA5!
@@ -115,8 +115,8 @@ dom0 = Domain(
 dom1 = Domain(
     xsize = 6000,
     ysize = 6000,
-    itot = 600,
-    jtot = 600,
+    itot = 500,
+    jtot = 500,
     n_ghost = 3,
     n_sponge = 3,
     lbc_freq = 60,

@@ -106,6 +106,13 @@ void Subdomain<TF>::create()
     if (!sw_subdomain)
         return;
 
+    #ifdef USECUDA
+    // The sub-domain machinery (saving lateral/top boundary conditions for a child
+    // domain) reads from host arrays and uses the CPU NN-interpolator. It is not
+    // (yet) ported to the GPU, so refuse rather than silently saving stale data.
+    throw std::runtime_error("Sub-domain boundary saving (\"sw_subdomain\") is not (yet) implemented on the GPU...");
+    #endif
+
     auto& gd = grid.get_grid_data();
     auto& md = master.get_MPI_data();
 

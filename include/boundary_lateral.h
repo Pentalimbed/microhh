@@ -29,6 +29,7 @@
 
 #include "master.h"
 #include "grid.h"
+#include "cuda_buffer.h"
 
 class Master;
 class Input;
@@ -57,6 +58,11 @@ class Boundary_lateral
         void exec_lateral_sponge(Stats<TF>&);
         void update_time_dependent(Timeloop<TF>&, const bool pres_fix=false);
         unsigned long get_time_limit(unsigned long);
+
+        // GPU functions and variables.
+        void prepare_device();
+        void clear_device();
+        void forward_device();   ///< Copy (interpolated) host LBC arrays to the device.
 
     private:
         Master& master;
@@ -119,6 +125,13 @@ class Boundary_lateral
         std::vector<TF> w_top_2d;
         std::vector<TF> w_top_2d_prev;
         std::vector<TF> w_top_2d_next;
+
+        // Device copies of the current (constant or time-interpolated) LBCs and `w_top`.
+        std::map<std::string, cuda_vector<TF>> lbc_w_g;
+        std::map<std::string, cuda_vector<TF>> lbc_e_g;
+        std::map<std::string, cuda_vector<TF>> lbc_s_g;
+        std::map<std::string, cuda_vector<TF>> lbc_n_g;
+        cuda_vector<TF> w_top_2d_g;
 
         const std::string tend_name = "lbc_sponge";
         const std::string tend_longname = "Lateral sponge layer";

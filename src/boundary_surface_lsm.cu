@@ -728,14 +728,22 @@ void Boundary_surface_lsm<TF>::exec(
 }
 
 template<typename TF>
-void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column)
+void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column, Thermo<TF>& thermo)
 {
+    auto& gd = grid.get_grid_data();
     const TF no_offset = 0.;
 
     auto tmp = fields.get_tmp_g();
 
     column.calc_time_series("obuk", obuk_g, no_offset);
     column.calc_time_series("ustar", ustar_g, no_offset);
+
+    if (sw_charnock)
+    {
+        column.calc_time_series("z0m", z0m_g, no_offset);
+        column.calc_time_series("z0h", z0h_g, no_offset);
+    }
+
     column.calc_time_series("wl", fields.ap2d.at("wl")->fld_g, no_offset);
 
     get_tiled_mean_g(tmp->fld_bot_g, "H", TF(1));
@@ -749,6 +757,56 @@ void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column)
 
     get_tiled_mean_g(tmp->fld_bot_g, "S", TF(1));
     column.calc_time_series("S", tmp->fld_bot_g, no_offset);
+
+    // Diagnosed 2m and 10m quantities.
+    const int blocki = gd.ithread_block;
+    const int blockj = gd.jthread_block;
+    const int gridi = gd.imax/blocki + (gd.imax%blocki > 0);
+    const int gridj = gd.jmax/blockj + (gd.jmax%blockj > 0);
+    dim3 grid_gpu_2d (gridi,  gridj,  1);
+    dim3 block_gpu_2d(blocki, blockj, 1);
+
+    TF* t1_5m = tmp->fld_bot_g;
+    TF* q1_5m = tmp->flux_bot_g;
+    TF* u10m  = tmp->grad_bot_g;
+    TF* v10m  = tmp->fld_top_g;
+    TF* U10m  = tmp->flux_top_g;
+
+    const bool pressure_is_3d = thermo.pressure_is_3d();
+    TF* prefh_g = thermo.get_basestate_fld_g("prefh");
+
+    auto wrapper = [&]<bool sw_3d>()
+    {
+        lsmk::diagnose_1_5m_10m_MO_g<TF, sw_3d><<<grid_gpu_2d, block_gpu_2d>>>(
+                t1_5m, q1_5m, u10m, v10m, U10m,
+                fields.ap.at("thl")->fld_bot_g,
+                fields.ap.at("qt")->fld_bot_g,
+                fields.ap.at("thl")->flux_bot_g,
+                fields.ap.at("qt")->flux_bot_g,
+                fields.ap.at("u")->flux_bot_g,
+                fields.ap.at("v")->flux_bot_g,
+                ustar_g,
+                obuk_g,
+                z0m_g,
+                z0h_g,
+                prefh_g,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+    };
+
+    if (pressure_is_3d)
+        wrapper.template operator()<true>();
+    else
+        wrapper.template operator()<false>();
+
+    column.calc_time_series("T_1_5m", t1_5m, no_offset);
+    column.calc_time_series("q_1_5m", q1_5m, no_offset);
+    column.calc_time_series("u_10m", u10m, no_offset);
+    column.calc_time_series("v_10m", v10m, no_offset);
+    column.calc_time_series("U_10m", U10m, no_offset);
 
     if (sw_tile_stats_col)
         for (auto& tile : tiles)

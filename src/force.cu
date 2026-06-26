@@ -166,6 +166,13 @@ void Force<TF>::prepare_device()
 
     const int nmemsize  = gd.kcells*sizeof(TF);
 
+    // These force options are not (yet) ported to the GPU. Throw a clear error
+    // rather than silently running the CPU code on stale host data in a GPU run.
+    if (swlspres == Large_scale_pressure_type::Geo_wind_3d)
+        throw std::runtime_error("3D geostrophic wind (\"swlspres=geo_3d\") is not (yet) implemented on the GPU...");
+    if (swrotation_2d)
+        throw std::runtime_error("2D rotation (\"swrotation_2d\") is not (yet) implemented on the GPU...");
+
     if (swlspres == Large_scale_pressure_type::Geo_wind)
     {
         ug_g.allocate(gd.kcells);

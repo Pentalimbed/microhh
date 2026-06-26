@@ -28,6 +28,7 @@
 #include "boundary_surface_kernels_gpu.h"
 #include "thermo_moist_functions.h"
 #include "monin_obukhov.h"
+#include "fast_math.h"
 
 namespace Land_surface_kernels_g
 {
@@ -679,6 +680,61 @@ template<typename TF> __global__
         {
             const int ij = i + j*icells;
             fld_scaled[ij] = fld[ij] * tile_frac[ij];
+        }
+    }
+
+    template<typename TF, bool pressure_is_3d> __global__
+    void diagnose_1_5m_10m_MO_g(
+            TF* const __restrict__ t2m,
+            TF* const __restrict__ q2m,
+            TF* const __restrict__ u10m,
+            TF* const __restrict__ v10m,
+            TF* const __restrict__ U10m,
+            const TF* const __restrict__ thl_bot,
+            const TF* const __restrict__ qt_bot,
+            const TF* const __restrict__ thl_fluxbot,
+            const TF* const __restrict__ qt_fluxbot,
+            const TF* const __restrict__ u_fluxbot,
+            const TF* const __restrict__ v_fluxbot,
+            const TF* const __restrict__ ustar,
+            const TF* const __restrict__ obuk,
+            const TF* const __restrict__ z0m,
+            const TF* const __restrict__ z0h,
+            const TF* const __restrict__ phydroh,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart,
+            const int jstride, const int kstride)
+    {
+        namespace tmf = Thermo_moist_functions;
+
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            const TF z_1_5m = TF(1.5);
+            const TF z_10m = TF(10);
+
+            const int ij = i + j * jstride;
+            const int ijk = ij + kstart * kstride;
+
+            TF exn_bot;
+            if (pressure_is_3d)
+                exn_bot = tmf::exner(phydroh[ijk]);
+            else
+                exn_bot = tmf::exner(phydroh[kstart]);
+
+            const TF fac1 = TF(1) / (ustar[ij] * most::fh(z_1_5m, z0h[ij], obuk[ij]));
+            const TF fac2 = TF(1) / (ustar[ij] * most::fm(z_10m,  z0m[ij], obuk[ij]));
+
+            t2m[ij] = (thl_bot[ij] * exn_bot) - thl_fluxbot[ij] * fac1;
+            q2m[ij] =  qt_bot[ij]             - qt_fluxbot[ij]  * fac1;
+
+            u10m[ij] = -u_fluxbot[ij] * fac2;
+            v10m[ij] = -v_fluxbot[ij] * fac2;
+
+            U10m[ij] = pow(Fast_math::pow2(u10m[ij]) + Fast_math::pow2(v10m[ij]), TF(0.5));
         }
     }
 

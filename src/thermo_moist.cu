@@ -818,6 +818,12 @@ void Thermo_moist<TF>::prepare_device()
     auto& gd = grid.get_grid_data();
     const int nmemsize = gd.kcells*sizeof(TF);
 
+    // 3D hydrostatic pressure (`swphydro_3d`) is not (yet) ported to the GPU.
+    // The GPU thermo path only uses the 1D base-state pressure, so refuse rather
+    // than silently running with the wrong pressure field.
+    if (swphydro_3d)
+        throw std::runtime_error("3D hydrostatic pressure (\"swphydro_3d\") is not (yet) implemented on the GPU...");
+
     // Allocate fields for Boussinesq and anelastic solver
     cuda_safe_call(cudaMalloc(&bs.thl0_g,    nmemsize));
     cuda_safe_call(cudaMalloc(&bs.qt0_g,     nmemsize));
