@@ -355,6 +355,157 @@ namespace
         }
     }
 
+    // 3D hydrostatic pressure integration (matches CPU `calc_phydro_3d`). One
+    // thread per column; the vertical integration is sequential in k.
+    template<typename TF> __global__
+    void calc_phydro_3d_g(
+            TF* const __restrict__ phydro,
+            TF* const __restrict__ phydroh,
+            const TF* const __restrict__ phydro_tod,
+            const TF* const __restrict__ thl,
+            const TF* const __restrict__ qt,
+            const TF* const __restrict__ dz,
+            const TF* const __restrict__ dzh,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart, const int kend,
+            const int jstride, const int kstride)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            const int kk = kstride;
+            const int ij = i + j*jstride;
+
+            // First model level (TOD) boundary condition.
+            {
+                const int ijk = ij + kend*kstride;
+                phydroh[ijk] = phydro_tod[ij];
+
+                const TF thlh = TF(0.5) * (thl[ijk-kk] + thl[ijk]);
+                const TF qth  = TF(0.5) * (qt [ijk-kk] + qt [ijk]);
+
+                const TF exh = exner(phydroh[ijk]);
+                Struct_sat_adjust<TF> ssa = sat_adjust_g(thlh, qth, phydroh[ijk], exh);
+                const TF thvh = virtual_temperature(exh, thlh, qth, ssa.ql, ssa.qi);
+
+                phydro[ijk-kk] = phydroh[ijk] * exp(grav<TF> * TF(0.5) * dzh[kend] / (Rd<TF> * exh * thvh));
+            }
+
+            for (int k=kend-1; k>=kstart; --k)
+            {
+                const int ijk = ij + k*kstride;
+
+                const TF ex = exner(phydro[ijk]);
+                Struct_sat_adjust<TF> ssaf = sat_adjust_g(thl[ijk], qt[ijk], phydro[ijk], ex);
+                const TF thv = virtual_temperature(ex, thl[ijk], qt[ijk], ssaf.ql, ssaf.qi);
+
+                phydroh[ijk] = phydroh[ijk+kk] * exp(grav<TF> * dz[k] / (Rd<TF> * ex * thv));
+
+                const TF exh = exner(phydroh[ijk]);
+                const TF thlh = TF(0.5) * (thl[ijk-kk] + thl[ijk]);
+                const TF qth  = TF(0.5) * (qt [ijk-kk] + qt [ijk]);
+
+                Struct_sat_adjust<TF> ssah = sat_adjust_g(thlh, qth, phydroh[ijk], exh);
+                const TF thvh = virtual_temperature(exh, thlh, qth, ssah.ql, ssah.qi);
+
+                phydro[ijk-kk] = phydro[ijk] * exp(grav<TF> * dzh[k] / (Rd<TF> * exh * thvh));
+            }
+        }
+    }
+
+    // Buoyancy tendency using the full 3D half-level pressure (matches the CPU
+    // `calc_buoyancy_tend_2nd<TF, true>`).
+    template<typename TF> __global__
+    void calc_buoyancy_tend_2nd_3d_g(
+            TF* __restrict__ wt, TF* __restrict__ th, TF* __restrict__ qt,
+            TF* __restrict__ thvrefh, TF* __restrict__ ph3d,
+            int istart, int jstart, int kstart,
+            int iend,   int jend,   int kend,
+            int jj, int kk)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart;
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const int ijk = i + j*jj + k*kk;
+
+            const TF thh = TF(0.5) * (th[ijk-kk] + th[ijk]);
+            const TF qth = TF(0.5) * (qt[ijk-kk] + qt[ijk]);
+
+            const TF exnh = exner(ph3d[ijk]);
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, ph3d[ijk], exnh);
+
+            if (ssa.ql + ssa.qi > 0)
+                wt[ijk] += buoyancy(exnh, thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
+            else
+                wt[ijk] += buoyancy_no_ql(thh, qth, thvrefh[k]);
+        }
+    }
+
+    // Liquid water / ice diagnostics using the full 3D pressure.
+    template<typename TF> __global__
+    void calc_liquid_water_3d_g(
+            TF* __restrict__ ql, TF* __restrict__ th, TF* __restrict__ qt,
+            TF* __restrict__ p3d,
+            int istart, int jstart, int kstart,
+            int iend,   int jend,   int kend,
+            int jj, int kk)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart;
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const int ijk = i + j*jj + k*kk;
+            ql[ijk] = sat_adjust_g(th[ijk], qt[ijk], p3d[ijk], exner(p3d[ijk])).ql;
+        }
+    }
+
+    template<typename TF> __global__
+    void calc_ice_3d_g(
+            TF* __restrict__ qi, TF* __restrict__ th, TF* __restrict__ qt,
+            TF* __restrict__ p3d,
+            int istart, int jstart, int kstart,
+            int iend,   int jend,   int kend,
+            int jj, int kk)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart;
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const int ijk = i + j*jj + k*kk;
+            qi[ijk] = sat_adjust_g(th[ijk], qt[ijk], p3d[ijk], exner(p3d[ijk])).qi;
+        }
+    }
+
+    template<typename TF> __global__
+    void calc_liquid_and_ice_3d_g(
+            TF* __restrict__ qlqi, TF* __restrict__ thl, TF* __restrict__ qt,
+            TF* __restrict__ p3d,
+            int istart, int jstart, int kstart,
+            int iend,   int jend,   int kend,
+            int jj, int kk)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart;
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const int ijk = i + j*jj + k*kk;
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p3d[ijk], exner(p3d[ijk]));
+            qlqi[ijk] = ssa.ql + ssa.qi;
+        }
+    }
+
     template<typename TF> __global__
     void calc_liquid_water_h_g(TF* __restrict__ qlh, TF* __restrict__ th, TF* __restrict__ qt,
                              TF* __restrict__ exnh, TF* __restrict__ ph,
@@ -818,11 +969,10 @@ void Thermo_moist<TF>::prepare_device()
     auto& gd = grid.get_grid_data();
     const int nmemsize = gd.kcells*sizeof(TF);
 
-    // 3D hydrostatic pressure (`swphydro_3d`) is not (yet) ported to the GPU.
-    // The GPU thermo path only uses the 1D base-state pressure, so refuse rather
-    // than silently running with the wrong pressure field.
+    // Device array for the (time-interpolated) top-of-domain pressure used by
+    // the 3D hydrostatic pressure feature.
     if (swphydro_3d)
-        throw std::runtime_error("3D hydrostatic pressure (\"swphydro_3d\") is not (yet) implemented on the GPU...");
+        phydro_tod_g.allocate(gd.ijcells);
 
     // Allocate fields for Boussinesq and anelastic solver
     cuda_safe_call(cudaMalloc(&bs.thl0_g,    nmemsize));
@@ -948,16 +1098,56 @@ void Thermo_moist<TF>::exec(const double dt, Stats<TF>& stats)
         forward_device();
     }
 
-    calc_buoyancy_tend_2nd_g<TF><<<gridGPU, blockGPU>>>(
-            fields.mt.at("w")->fld_g,
-            fields.sp.at("thl")->fld_g,
-            fields.sp.at("qt")->fld_g,
-            bs.thvrefh_g,
-            bs.exnrefh_g,
-            bs.prefh_g,
-            gd.istart, gd.jstart, gd.kstart+1,
-            gd.iend,   gd.jend,   gd.kend,
-            gd.icells, gd.ijcells);
+    if (swphydro_3d && swtimedep_phydro_3d)
+    {
+        // Sync the (host-interpolated) top-of-domain pressure to the device, then
+        // recompute the 3D hydrostatic pressure from the device thl/qt fields.
+        cuda_safe_call(cudaMemcpy(
+                phydro_tod_g, phydro_tod.data(),
+                gd.ijcells*sizeof(TF), cudaMemcpyHostToDevice));
+
+        dim3 gridGPU2d (gridi, gridj, 1);
+        dim3 blockGPU2d(blocki, blockj, 1);
+
+        calc_phydro_3d_g<TF><<<gridGPU2d, blockGPU2d>>>(
+                fields.sd.at("phydro_3d")->fld_g,
+                fields.sd.at("phydroh_3d")->fld_g,
+                phydro_tod_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                gd.dz_g, gd.dzh_g,
+                gd.istart, gd.iend,
+                gd.jstart, gd.jend,
+                gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+
+        // Overwrite mean profiles p and ph in the base state.
+        field3d_operators.calc_mean_profile_g(bs.pref_g, fields.sd.at("phydro_3d")->fld_g);
+        field3d_operators.calc_mean_profile_g(bs.prefh_g, fields.sd.at("phydroh_3d")->fld_g);
+    }
+
+    if (swphydro_3d)
+        calc_buoyancy_tend_2nd_3d_g<TF><<<gridGPU, blockGPU>>>(
+                fields.mt.at("w")->fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.thvrefh_g,
+                fields.sd.at("phydroh_3d")->fld_g,
+                gd.istart, gd.jstart, gd.kstart+1,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+    else
+        calc_buoyancy_tend_2nd_g<TF><<<gridGPU, blockGPU>>>(
+                fields.mt.at("w")->fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.thvrefh_g,
+                bs.exnrefh_g,
+                bs.prefh_g,
+                gd.istart, gd.jstart, gd.kstart+1,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
     cuda_check_error();
 
     cudaDeviceSynchronize();
@@ -1034,12 +1224,20 @@ void Thermo_moist<TF>::get_thermo_field_g(
     }
     else if (name == "ql")
     {
-        calc_liquid_water_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
-            gd.istart,  gd.jstart,  gd.kstart,
-            gd.iend,    gd.jend,    gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_liquid_water_3d_g<TF><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_liquid_water_g<TF><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnref_g, bs.pref_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "ql_h")
@@ -1054,24 +1252,42 @@ void Thermo_moist<TF>::get_thermo_field_g(
     }
     else if (name == "qi")
     {
-        calc_ice_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
-            gd.istart,  gd.jstart,  gd.kstart,
-            gd.iend,    gd.jend,    gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_ice_3d_g<TF><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_ice_g<TF><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                bs.exnref_g, bs.pref_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "qlqi")
     {
-        calc_liquid_and_ice_g<TF><<<gridGPU2, blockGPU2>>>(
-            fld.fld_g,
-            fields.sp.at("thl")->fld_g,
-            fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
-            gd.istart,  gd.jstart,  gd.kstart,
-            gd.iend,    gd.jend,    gd.kend,
-            gd.icells, gd.ijcells);
+        if (swphydro_3d)
+            calc_liquid_and_ice_3d_g<TF><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                fields.sd.at("phydro_3d")->fld_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
+        else
+            calc_liquid_and_ice_g<TF><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.exnref_g, bs.pref_g,
+                gd.istart,  gd.jstart,  gd.kstart,
+                gd.iend,    gd.jend,    gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "qlqi")

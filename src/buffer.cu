@@ -35,6 +35,37 @@
 #include "cuda_launcher.h"
 #include "cuda_tiling.h"
 
+namespace
+{
+    // Damping towards a (time-interpolated) 3D buffer field. Mirrors the CPU
+    // `calc_buffer_3d()`: `abuf` is a 3D field indexed from `kstart_buffer`,
+    // and `sigmaz` is the pre-computed damping coefficient per level.
+    template<typename TF> __global__
+    void calc_buffer_3d_g(
+            TF* const __restrict__ at,
+            const TF* const __restrict__ a,
+            const TF* const __restrict__ abuf,
+            const TF* const __restrict__ sigmaz,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart_buffer, const int kend,
+            const int jstride, const int kstride)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            for (int k=kstart_buffer; k<kend; ++k)
+            {
+                const int ijk  = i + j*jstride + k*kstride;
+                const int ijk2 = i + j*jstride + (k-kstart_buffer)*kstride;
+                at[ijk] -= sigmaz[k] * (a[ijk]-abuf[ijk2]);
+            }
+        }
+    }
+}
+
 template<typename TF>
 void Buffer<TF>::prepare_device()
 {
@@ -42,20 +73,33 @@ void Buffer<TF>::prepare_device()
 
     if (swbuffer)
     {
-        // These buffer sub-features are not (yet) ported to the GPU. Throw a clear
+        // This buffer sub-feature is not (yet) ported to the GPU. Throw a clear
         // error rather than silently producing wrong results on stale host data.
-        if (swbuffer_3d)
-            throw std::runtime_error("3D buffer (\"swbuffer_3d\") is not (yet) implemented on the GPU...");
         if (swupdate_local)
             throw std::runtime_error("Local-mean buffer (\"swupdate_local\") is not (yet) implemented on the GPU...");
 
         const int nmemsize = gd.kcells*sizeof(TF);
 
         // Allocate the buffer arrays at GPU.
-        for (auto& it : fields.ap)
+        if (swbuffer_3d)
         {
-            bufferprofs_g.emplace(it.first, cuda_vector<TF>(gd.kcells));
-            cuda_safe_call(cudaMemcpy(bufferprofs_g.at(it.first), bufferprofs.at(it.first).data(), nmemsize, cudaMemcpyHostToDevice));
+            // 3D buffer fields, sized to match the host `bufferprofs` arrays.
+            for (auto& fld : buffer3d_list)
+            {
+                const int ksize = fld == "w" ? gd.kend-bufferkstarth : gd.kend-bufferkstart;
+                bufferprofs_g.emplace(fld, cuda_vector<TF>(gd.ijcells*ksize));
+                cuda_safe_call(cudaMemcpy(
+                        bufferprofs_g.at(fld), bufferprofs.at(fld).data(),
+                        gd.ijcells*ksize*sizeof(TF), cudaMemcpyHostToDevice));
+            }
+        }
+        else
+        {
+            for (auto& it : fields.ap)
+            {
+                bufferprofs_g.emplace(it.first, cuda_vector<TF>(gd.kcells));
+                cuda_safe_call(cudaMemcpy(bufferprofs_g.at(it.first), bufferprofs.at(it.first).data(), nmemsize, cudaMemcpyHostToDevice));
+            }
         }
 
         // Pre-calculate buffer factor.
@@ -88,6 +132,50 @@ void Buffer<TF>::exec(Stats<TF>& stats)
     if (swbuffer)
     {
         const Grid_data<TF>& gd = grid.get_grid_data();
+
+        if (swbuffer_3d)
+        {
+            // Sync the (time-interpolated) host buffer fields to the device. This
+            // is updated each step in the shared `update_time_dependent()`.
+            for (auto& fld : buffer3d_list)
+            {
+                const int kstart_buffer = fld == "w" ? bufferkstarth : bufferkstart;
+                const int ksize = gd.kend - kstart_buffer;
+                cuda_safe_call(cudaMemcpy(
+                        bufferprofs_g.at(fld), bufferprofs.at(fld).data(),
+                        gd.ijcells*ksize*sizeof(TF), cudaMemcpyHostToDevice));
+            }
+
+            const int blocki = gd.ithread_block;
+            const int blockj = gd.jthread_block;
+            const int gridi = gd.imax/blocki + (gd.imax%blocki > 0);
+            const int gridj = gd.jmax/blockj + (gd.jmax%blockj > 0);
+            dim3 gridGPU (gridi,  gridj,  1);
+            dim3 blockGPU(blocki, blockj, 1);
+
+            for (auto& fld : buffer3d_list)
+            {
+                const int kstart_buffer = fld == "w" ? bufferkstarth : bufferkstart;
+                const cuda_vector<TF>& sigma = fld == "w" ? sigma_zh : sigma_z;
+
+                calc_buffer_3d_g<TF><<<gridGPU, blockGPU>>>(
+                        fields.at.at(fld)->fld_g,
+                        fields.ap.at(fld)->fld_g,
+                        bufferprofs_g.at(fld),
+                        sigma,
+                        gd.istart, gd.iend,
+                        gd.jstart, gd.jend,
+                        kstart_buffer, gd.kend,
+                        gd.icells, gd.ijcells);
+            }
+            cuda_check_error();
+
+            cudaDeviceSynchronize();
+            for (auto& fld : buffer3d_list)
+                stats.calc_tend(*fields.at.at(fld), tend_name);
+
+            return;
+        }
 
         Grid_layout grid_layout_full = {
                 gd.istart, gd.iend,
@@ -175,17 +263,6 @@ void Buffer<TF>::exec(Stats<TF>& stats)
         for (auto it : fields.st)
             stats.calc_tend(*it.second, tend_name);
     }
-}
-
-template <typename TF>
-void Buffer<TF>::update_time_dependent(Timeloop<TF>& timeloop)
-{
-    // The time-dependent 3D buffer is only active when `swbuffer_3d && swtimedep_buffer_3d`,
-    // and that combination is rejected in `prepare_device()` on the GPU. Nothing to do here.
-    if (!(swbuffer_3d && swtimedep_buffer_3d))
-        return;
-
-    throw std::runtime_error("Time-dependent 3D buffer is not (yet) implemented on the GPU...");
 }
 #endif
 

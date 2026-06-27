@@ -254,6 +254,63 @@ void Pres_2<TF>::exec(double dt, Stats<TF>& stats)
 {
     auto& gd = grid.get_grid_data();
 
+    // Open boundary conditions use a discrete cosine transform (Neumann) for the
+    // pressure solve, which cuFFT does not support natively. Fall back to the
+    // validated host solver: copy the velocities and their tendencies to the
+    // host, run the CPU input/solve/output (which already handle the open-BC
+    // velocity-tendency zeroing, Neumann pressure ghost cells, and DCT via FFTW),
+    // and copy the updated tendencies back to the device.
+    if (sw_openbc)
+    {
+        const int blocki_c = gd.ithread_block;
+        const int blockj_c = gd.jthread_block;
+        const int gridi_c  = gd.imax/blocki_c + (gd.imax%blocki_c > 0);
+        const int gridj_c  = gd.jmax/blockj_c + (gd.jmax%blockj_c > 0);
+        dim3 gridGPU_c (gridi_c,  gridj_c,  gd.kmax);
+        dim3 blockGPU_c(blocki_c, blockj_c, 1);
+
+        // Set cyclic BCs on the velocity tendencies (device), matching the
+        // periodic GPU path, before copying to the host.
+        boundary_cyclic.exec_g(fields.mt.at("u")->fld_g);
+        boundary_cyclic.exec_g(fields.mt.at("v")->fld_g);
+        boundary_cyclic.exec_g(fields.mt.at("w")->fld_g);
+
+        const int nmemsize = gd.ncells*sizeof(TF);
+        for (const std::string& fld : {std::string("u"), std::string("v"), std::string("w")})
+        {
+            cuda_safe_call(cudaMemcpy(fields.mp.at(fld)->fld.data(), fields.mp.at(fld)->fld_g, nmemsize, cudaMemcpyDeviceToHost));
+            cuda_safe_call(cudaMemcpy(fields.mt.at(fld)->fld.data(), fields.mt.at(fld)->fld_g, nmemsize, cudaMemcpyDeviceToHost));
+        }
+
+        // Create the input for the pressure solver.
+        input(fields.sd.at("p")->fld.data(),
+              fields.mp.at("u")->fld.data(), fields.mp.at("v")->fld.data(), fields.mp.at("w")->fld.data(),
+              fields.mt.at("u")->fld.data(), fields.mt.at("v")->fld.data(), fields.mt.at("w")->fld.data(),
+              gd.dzi.data(), fields.rhoref.data(), fields.rhorefh.data(),
+              dt);
+
+        // Solve the system on the host (FFTW DCT + tridiagonal solver).
+        auto tmp1_h = fields.get_tmp();
+        auto tmp2_h = fields.get_tmp();
+        solve(fields.sd.at("p")->fld.data(), tmp1_h->fld.data(), tmp2_h->fld.data(),
+              gd.dz.data(), fields.rhoref.data());
+        fields.release_tmp(tmp1_h);
+        fields.release_tmp(tmp2_h);
+
+        // Get the pressure tendencies from the pressure field.
+        output(fields.mt.at("u")->fld.data(), fields.mt.at("v")->fld.data(), fields.mt.at("w")->fld.data(),
+               fields.sd.at("p")->fld.data(), gd.dzhi.data());
+
+        // Copy the updated velocity tendencies back to the device.
+        for (const std::string& fld : {std::string("u"), std::string("v"), std::string("w")})
+            cuda_safe_call(cudaMemcpy(fields.mt.at(fld)->fld_g, fields.mt.at(fld)->fld.data(), nmemsize, cudaMemcpyHostToDevice));
+
+        stats.calc_tend(*fields.mt.at("u"), tend_name);
+        stats.calc_tend(*fields.mt.at("v"), tend_name);
+        stats.calc_tend(*fields.mt.at("w"), tend_name);
+        return;
+    }
+
     // Grid layout for KL/CL launches over interior, including ghost cells.
     Grid_layout grid_layout_int = {
             gd.istart, gd.iend,

@@ -153,6 +153,7 @@ class Thermo_moist : public Thermo<TF>
         std::vector<TF> phydro_tod;
         std::vector<TF> phydro_tod_prev;
         std::vector<TF> phydro_tod_next;
+        cuda_vector<TF> phydro_tod_g;  ///< Device copy of the (interpolated) top-of-domain pressure.
         void create_phydro_3d(Timeloop<TF>&);
 
         std::vector<std::string> dumplist;         ///< List with all 3d dumps from the ini file.

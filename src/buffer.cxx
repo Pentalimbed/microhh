@@ -539,8 +539,12 @@ void Buffer<TF>::exec(Stats<TF>& stats)
 
     fields.release_tmp(tmp);
 }
+#endif
 
 
+// The time-dependent 3D buffer update is pure host I/O + interpolation into the
+// host `bufferprofs` arrays, so it is shared between the CPU and GPU builds. On
+// the GPU these host arrays are synced to the device at the start of `exec()`.
 template <typename TF>
 void Buffer<TF>::update_time_dependent(
         Timeloop<TF>& timeloop)
@@ -628,7 +632,6 @@ void Buffer<TF>::update_time_dependent(
             f0, f1, ncells);
     }
 }
-#endif
 
 #ifdef FLOAT_SINGLE
 template class Buffer<float>;

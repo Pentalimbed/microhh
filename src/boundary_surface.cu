@@ -46,6 +46,36 @@ namespace
 
     const int nzL = 10000; // Size of the lookup table for MO iterations.
 
+    template<typename TF> __global__
+    void calc_z0_charnock_g(
+            TF* const __restrict__ z0m,
+            TF* const __restrict__ z0h,
+            const TF* const __restrict__ ustar,
+            const TF alpha_m, const TF alpha_ch, const TF alpha_h,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int icells)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            const TF visc = TF(1.5e-5);
+            const TF gi = TF(1)/Constants::grav<TF>;
+            const TF min_ustar = TF(1e-8);
+
+            const int ij = i + j*icells;
+
+            // Limit u* to prevent div/0:
+            const TF ustar_lim = fmax(ustar[ij], min_ustar);
+
+            // Roughness lengths, like IFS:
+            z0m[ij] = alpha_m * visc/ustar_lim + alpha_ch * fm::pow2(ustar_lim) * gi;
+            z0h[ij] = alpha_h * visc/ustar_lim;
+        }
+    }
+
     template<typename TF, bool sw_constant_z0> __global__
     void stability_g(
             TF* const __restrict__ ustar,
@@ -375,6 +405,23 @@ void Boundary_surface<TF>::exec(
     dim3 gridGPU2 (gridi,  gridj,  1);
     dim3 blockGPU2(blocki, blockj, 1);
 
+    // Update roughness lengths when the Charnock relation is used,
+    // using the friction velocity from the previous time step.
+    if (sw_charnock)
+    {
+        calc_z0_charnock_g<TF><<<gridGPU, blockGPU>>>(
+            z0m_g, z0h_g,
+            ustar_g,
+            alpha_m, alpha_ch, alpha_h,
+            gd.istart, gd.iend,
+            gd.jstart, gd.jend,
+            gd.icells);
+        cuda_check_error();
+
+        boundary_cyclic.exec_2d_g(z0m_g);
+        boundary_cyclic.exec_2d_g(z0h_g);
+    }
+
     // Calculate dutot in tmp2
     auto dutot = fields.get_tmp_g();
 
@@ -530,6 +577,12 @@ void Boundary_surface<TF>::exec_column(Column<TF>& column, Thermo<TF>& thermo)
     const TF no_offset = 0.;
     column.calc_time_series("obuk", obuk_g, no_offset);
     column.calc_time_series("ustar", ustar_g, no_offset);
+
+    if (sw_charnock)
+    {
+        column.calc_time_series("z0m", z0m_g, no_offset);
+        column.calc_time_series("z0h", z0h_g, no_offset);
+    }
 }
 #endif
 

@@ -815,6 +815,7 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
     if (!sw_openbc or !sw_sponge)
         return;
 
+
     auto& gd = grid.get_grid_data();
     auto& md = master.get_MPI_data();
 
@@ -881,8 +882,8 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
                 tau_sponge, w_diff, n_sponge, gd.igc,
                 gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
                 gd.icells, gd.jcells, gd.ijcells);
-        sponge_s_we.template operator()<Lbc_location::South, false>(lbc_s_g, "u");
-        sponge_s_we.template operator()<Lbc_location::North, false>(lbc_n_g, "u");
+        sponge_s_sn.template operator()<Lbc_location::South, false>(lbc_s_g, "u");
+        sponge_s_sn.template operator()<Lbc_location::North, false>(lbc_n_g, "u");
 
         lateral_sponge_v_g<TF, Lbc_location::South><<<grid_ik, block_ik>>>(
                 fields.mt.at("v")->fld_g, fields.mp.at("v")->fld_g, lbc_s_g.at("v"),

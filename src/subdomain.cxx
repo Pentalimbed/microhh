@@ -106,13 +106,6 @@ void Subdomain<TF>::create()
     if (!sw_subdomain)
         return;
 
-    #ifdef USECUDA
-    // The sub-domain machinery (saving lateral/top boundary conditions for a child
-    // domain) reads from host arrays and uses the CPU NN-interpolator. It is not
-    // (yet) ported to the GPU, so refuse rather than silently saving stale data.
-    throw std::runtime_error("Sub-domain boundary saving (\"sw_subdomain\") is not (yet) implemented on the GPU...");
-    #endif
-
     auto& gd = grid.get_grid_data();
     auto& md = master.get_MPI_data();
 
@@ -312,6 +305,18 @@ void Subdomain<TF>::save_bcs(
 
     auto& gd = grid.get_grid_data();
     auto& md = master.get_MPI_data();
+
+    // Determine up front whether either save will fire this step. The sub-domain
+    // saving reads the host `fld` arrays + CPU NN-interpolator, so under CUDA we
+    // first copy the prognostic fields back from the device. This is infrequent
+    // (only at `savetime_bcs` / `savetime_buffer`), so the cost is negligible.
+    const bool save_lbcs   = timeloop.get_itime() % convert_to_itime(savetime_bcs) == 0;
+    const bool save_buffer = sw_save_buffer && timeloop.get_itime() % convert_to_itime(savetime_buffer) == 0;
+
+    #ifdef USECUDA
+    if (save_lbcs || save_buffer)
+        fields.backward_device();
+    #endif
 
     auto save_binary = [&](
             NN_interpolator<TF>& lbc,

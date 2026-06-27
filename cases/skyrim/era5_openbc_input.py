@@ -119,7 +119,7 @@ dom1 = Domain(
     jtot = 500,
     n_ghost = 3,
     n_sponge = 3,
-    lbc_freq = 60,
+    lbc_freq = 360,
     center_in_parent=True,
     parent = dom0
 )
