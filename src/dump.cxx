@@ -181,7 +181,10 @@ void Dump<TF>::save_dump(TF* data, const std::string& varname, int iotime)
     const double no_offset = 0.;
     char filename[256];
 
-    if (swdump && iotime % 21600 == 0)
+    // NOTE: the timing is already gated by `do_dump(itime, idt)` upstream, which
+    // enforces `itime % isampletime == 0`. So here we only need the `swdump`
+    // switch; the `iotime` interval is handled by `sampletime`.
+    if (swdump)
     {
         std::snprintf(filename, 256, "%s.%07d", varname.c_str(), iotime);
         std::ifstream infile(filename);
