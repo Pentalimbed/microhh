@@ -57,8 +57,8 @@ Settings
 """
 float_type = np.float32
 
-start_date = datetime(year=2014, month=11, day=15, hour=10)
-end_date   = datetime(year=2014, month=11, day=15, hour=15)
+start_date = datetime(year=2014, month=11, day=15, hour=11)
+end_date   = datetime(year=2014, month=11, day=15, hour=13)
 
 # All domains are put in a sub-folder `work_dir/domX`.
 work_dir = '/home/flc/Projects/microhh/cases/skyrim/'

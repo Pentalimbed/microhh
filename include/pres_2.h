@@ -76,6 +76,17 @@ class Pres_2 : public Pres<TF>
         cuda_vector<TF> a_g;
         cuda_vector<TF> c_g;
         cuda_vector<TF> work2d_g;
+
+        // Open-BC DCT (REDFT10 forward / REDFT01 backward) as batched matrix
+        // multiplies, since cuFFT has no native DCT. The backward matrices have
+        // the 1/(2N) normalization baked in to match the CPU FFTW path.
+        cuda_vector<TF> dctfi_g;  // forward DCT matrix, i-direction (itot x itot)
+        cuda_vector<TF> dctbi_g;  // backward DCT matrix, i-direction (itot x itot)
+        cuda_vector<TF> dctfj_g;  // forward DCT matrix, j-direction (jtot x jtot)
+        cuda_vector<TF> dctbj_g;  // backward DCT matrix, j-direction (jtot x jtot)
+
+        void dct_forward (TF* const, TF* const);  // p, tmp
+        void dct_backward(TF* const, TF* const);  // p, tmp
         #endif
 
         void input(TF* const restrict,
