@@ -220,6 +220,9 @@ def create_case_input(
     ini['grid']['ysize'] = ysize
     ini['grid']['zsize'] = zsize
 
+    ini['grid']['lat'] = ls2d_settings["central_lat"]
+    ini['grid']['lon'] = ls2d_settings["central_lon"]
+
     ini['buffer']['zstart'] = 0.75 * zsize
 
     if use_htessel:
