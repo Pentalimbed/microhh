@@ -87,7 +87,8 @@ NOTE: vertical grid definition in (LS)2D is not identical to MicroHH's grid.
       matches the one from MicroHH, otherwise the initial fields won't be divergence free.
 """
 # _g = ls2d.grid.Grid_linear_stretched(kmax=128, dz0=20, alpha=0.01)
-_g = ls2d.grid.Grid_equidist(kmax=400, dz0=12)
+_g = ls2d.grid.Grid_linear_stretched(kmax=200, dz0=12, alpha=0.01)
+# _g = ls2d.grid.Grid_equidist(kmax=400, dz0=12)
 gd = calc_vertical_grid_2nd(_g.z, _g.zsize)
 
 zstart_buffer = 0.75 * gd['zsize']
@@ -113,10 +114,10 @@ dom0 = Domain(
 
 # Inner domains(s), nested in parent LES domain.
 dom1 = Domain(
-    xsize = 6000,
-    ysize = 6000,
-    itot = 500,
-    jtot = 500,
+    xsize = 4800,
+    ysize = 4800,
+    itot = 400,
+    jtot = 400,
     n_ghost = 3,
     n_sponge = 3,
     lbc_freq = 360,
@@ -250,7 +251,7 @@ if args.domain == 0:
     ini['boundary_lateral']['slist'] = ['thl', 'qt']
     ini['buffer']['loadfreq'] = 3600
 else:
-    ini['boundary_lateral']['slist'] = ['thl', 'qt', 'qr', 'nr']
+    ini['boundary_lateral']['slist'] = ['thl', 'qt', 'qr', 'qs', 'qg']
     ini['buffer']['loadfreq'] = 600
 
 # Output LBCs for child domain.
@@ -356,7 +357,8 @@ else:
             'thl': 0,
             'qt': 0,
             'qr': 0,
-            'nr': 0}
+            'qs': 0,
+            'qg': 0}
 
     # Regrid all 2D pressure @ TOD files.
     fields_2d = {
@@ -381,8 +383,8 @@ else:
             domain.ystart_in_parent,
             parent_exp_dir,
             exp_dir,
-            float_type,
-            method='nearest',
+            float_type=float_type,
+            # method='nearest',
             name_suffix='overwrite')
 
 

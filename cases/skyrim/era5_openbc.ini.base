@@ -124,7 +124,7 @@ loadfreq=None
 endtime=None
 dt=6.
 dtmax=60
-savetime=3600
+savetime=1800
 outputiter=20
 adaptivestep=true
 starttime=0
@@ -148,4 +148,4 @@ limitlist=qt,qr,qs,qg
 [dump]
 swdump=1
 sampletime=360
-dumplist=u,v,w,ql,qi
+dumplist=ql,qi

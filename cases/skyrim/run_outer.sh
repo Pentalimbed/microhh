@@ -1,6 +1,6 @@
 # Cleanup!
-rm ./dom0/*00*
-rm ./dom0/*.nc
+rm ./dom0/*
+cp microhh dom0
 
 base_dir=$(pwd) 
 nproc=8
