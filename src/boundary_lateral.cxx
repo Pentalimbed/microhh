@@ -148,7 +148,7 @@ namespace
         const TF v3 = lbc_val - fld[ijk-icells];
         const TF v4 = lbc_val - fld[ijk+icells];
 
-        const TF fld_diff = v1 + v2 + v3 + v3 - TF(4) * vc;
+        const TF fld_diff = v1 + v2 + v3 + v4 - TF(4) * vc;
 
         return fld_diff;
     }
