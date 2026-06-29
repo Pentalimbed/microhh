@@ -57,8 +57,8 @@ Settings
 """
 float_type = np.float32
 
-start_date = datetime(year=2014, month=11, day=15, hour=11)
-end_date   = datetime(year=2014, month=11, day=15, hour=13)
+start_date = datetime(year=2014, month=11, day=15, hour=12)
+end_date   = datetime(year=2014, month=11, day=15, hour=14)
 
 # All domains are put in a sub-folder `work_dir/domX`.
 work_dir = '/home/flc/Projects/microhh/cases/skyrim/'
@@ -109,7 +109,7 @@ dom0 = Domain(
     lon=settings['central_lon'],
     lat=settings['central_lat'],
     anchor='center',
-    proj_str='+proj=utm +zone=21 +datum=WGS84 +units=m +no_defs +type=crs'
+    proj_str='+proj=utm +zone=31 +datum=WGS84 +units=m +no_defs +type=crs'
 )
 
 # Inner domains(s), nested in parent LES domain.
@@ -243,12 +243,13 @@ ini['cross']['yz'] = domain.xsize/2
 
 # Open-bounary specific settings.
 ini['boundary_lateral']['n_sponge'] = domain.n_sponge
-ini['boundary_lateral']['tau_sponge'] = domain.n_sponge * domain.dx / (10 * 5)
+ini['boundary_lateral']['tau_sponge'] = 60
 ini['boundary_lateral']['loadfreq'] = domain.lbc_freq
 
 # Hack; how to best define this.
 if args.domain == 0:
-    ini['boundary_lateral']['slist'] = ['thl', 'qt']
+    # ini['boundary_lateral']['slist'] = ['thl', 'qt']  # this is problematic
+    ini['boundary_lateral'].pop('slist', None)
     ini['buffer']['loadfreq'] = 3600
 else:
     ini['boundary_lateral']['slist'] = ['thl', 'qt', 'qr', 'qs', 'qg']

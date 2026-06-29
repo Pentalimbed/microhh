@@ -148,4 +148,4 @@ limitlist=qt,qr,qs,qg
 [dump]
 swdump=1
 sampletime=360
-dumplist=ql,qi
+dumplist=ql,qi,u,v,w

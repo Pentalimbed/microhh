@@ -1,4 +1,5 @@
 # Cleanup!
+mkdir -p dom1
 rm ./dom1/*
 cp microhh dom1
 
