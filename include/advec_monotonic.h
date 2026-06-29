@@ -195,7 +195,7 @@ namespace Advec_monotonic
                          - ( flux_lim(v[ijk+jj1], s[ijk-jj1], s[ijk    ], s[ijk+jj1], s[ijk+jj2])
                            - flux_lim(v[ijk    ], s[ijk-jj2], s[ijk-jj1], s[ijk    ], s[ijk+jj1]) ) * dyi
 
-                         - ( // No flux through boundary
+                         - ( rhorefh[k+1] * flux_lim_top(w[ijk+kk1], s[ijk-kk1], s[ijk    ], s[ijk+kk1], s[ijk+kk2])
                            - rhorefh[k  ] * flux_lim_top(w[ijk    ], s[ijk-kk2], s[ijk-kk1], s[ijk    ], s[ijk+kk1]) ) / rhoref[k] * dzi[k];
             }
     }
@@ -251,7 +251,7 @@ namespace Advec_monotonic
             for (int i=istart; i<iend; ++i)
             {
                 const int ijk = i + j*jj + k*kk;
-                st[ijk] = TF(0.);
+                st[ijk] = flux_lim_top(w[ijk], s[ijk-kk2], s[ijk-kk1], s[ijk], s[ijk+kk1]);
             }
     }
 }

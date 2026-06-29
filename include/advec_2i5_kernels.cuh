@@ -119,8 +119,9 @@ namespace Advec_2i5_kernels
             else if (level.distance_to_end() == 0)
             {
                 ut[ijk] +=
-                        // w*du/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - ( -rhorefh[k] * interp2(w[ijk-ii1    ], w[ijk    ]) * interp2(u[ijk-kk1], u[ijk    ]) ) * rhorefi[k] * dzi[k];
+                        // w*du/dz -> second order interpolation for fluxbot and fluxtop
+                        - ( rhorefh[k+1] * interp2(w[ijk-ii1+kk1], w[ijk+kk1]) * interp2(u[ijk    ], u[ijk+kk1])
+                          - rhorefh[k  ] * interp2(w[ijk-ii1    ], w[ijk    ]) * interp2(u[ijk-kk1], u[ijk    ]) ) * rhorefi[k] * dzi[k];
             }
             else
             {
@@ -226,8 +227,9 @@ namespace Advec_2i5_kernels
             else if (level.distance_to_end() == 0)
             {
                 vt[ijk] +=
-                        // w*dv/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - ( -rhorefh[k  ] * interp2(w[ijk-jj1    ], w[ijk    ]) * interp2(v[ijk-kk1], v[ijk    ]) ) * rhorefi[k] * dzi[k];
+                        // w*dv/dz -> second order interpolation for fluxbot and fluxtop
+                        - ( rhorefh[k+1] * interp2(w[ijk-jj1+kk1], w[ijk+kk1]) * interp2(v[ijk    ], v[ijk+kk1])
+                          - rhorefh[k  ] * interp2(w[ijk-jj1    ], w[ijk    ]) * interp2(v[ijk-kk1], v[ijk    ]) ) * rhorefi[k] * dzi[k];
             }
             else
             {
@@ -428,8 +430,9 @@ namespace Advec_2i5_kernels
             else if (level.distance_to_end() == 0)
             {
                 st[ijk] +=
-                        // w*ds/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - (- rhorefh[k  ] * w[ijk    ] * interp2(s[ijk-kk1], s[ijk    ]) ) * rhorefi[k] * dzi[k];
+                        // w*ds/dz -> second order interpolation for fluxbot and fluxtop
+                        - ( rhorefh[k+1] * w[ijk+kk1] * interp2(s[ijk    ], s[ijk+kk1])
+                          - rhorefh[k  ] * w[ijk    ] * interp2(s[ijk-kk1], s[ijk    ]) ) * rhorefi[k] * dzi[k];
             }
             else
             {
@@ -537,7 +540,7 @@ namespace Advec_2i5_kernels
                     - ( flux_lim_g(v[ijk+jj1], s[ijk-jj1], s[ijk    ], s[ijk+jj1], s[ijk+jj2])
                         - flux_lim_g(v[ijk    ], s[ijk-jj2], s[ijk-jj1], s[ijk    ], s[ijk+jj1]) ) * dyi;
 
-            if (level.distance_to_start() >= 2 && level.distance_to_start() >= 2)
+            if (level.distance_to_start() >= 2 && level.distance_to_end() >= 2)
             {
                 st[ijk] +=
                         - ( rhorefh[k+1] * flux_lim_g(w[ijk+kk], s[ijk-kk1], s[ijk    ], s[ijk+kk1], s[ijk+kk2])
@@ -563,8 +566,8 @@ namespace Advec_2i5_kernels
             else if (level.distance_to_end() == 0)
             {
                 st[ijk] +=
-                        - (
-                                - rhorefh[k  ] * flux_lim_top_g(w[ijk    ], s[ijk-kk2], s[ijk-kk1], s[ijk    ], s[ijk+kk1]) ) * rhorefi[k] * dzi[k];
+                        - ( rhorefh[k+1] * flux_lim_top_g(w[ijk+kk1], s[ijk-kk1], s[ijk    ], s[ijk+kk1], s[ijk+kk2])
+                          - rhorefh[k  ] * flux_lim_top_g(w[ijk    ], s[ijk-kk2], s[ijk-kk1], s[ijk    ], s[ijk+kk1]) ) * rhorefi[k] * dzi[k];
             }
         }
     };

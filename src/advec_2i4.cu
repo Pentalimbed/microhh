@@ -103,7 +103,8 @@ namespace
                     - (  interp2(v[ijk-ii1+jj1], v[ijk+jj1]) * interp4c(u[ijk-jj1], u[ijk    ], u[ijk+jj1], u[ijk+jj2])
                        - interp2(v[ijk-ii1    ], v[ijk    ]) * interp4c(u[ijk-jj2], u[ijk-jj1], u[ijk    ], u[ijk+jj1]) ) * dyi
 
-                    - ( -rhorefh[k] * interp2(w[ijk-ii1    ], w[ijk    ]) * interp2(u[ijk-kk1], u[ijk    ]) ) / rhoref[k] * dzi[k];
+                    - (  rhorefh[k+1] * interp2(w[ijk-ii1+kk1], w[ijk+kk1]) * interp2(u[ijk    ], u[ijk+kk1])
+                       - rhorefh[k  ] * interp2(w[ijk-ii1    ], w[ijk    ]) * interp2(u[ijk-kk1], u[ijk    ]) ) / rhoref[k] * dzi[k];
             }
             else
             {
@@ -188,7 +189,8 @@ namespace
                     - (  interp2(v[ijk        ], v[ijk+jj1]) * interp4c(v[ijk-jj1], v[ijk    ], v[ijk+jj1], v[ijk+jj2])
                        - interp2(v[ijk-jj1    ], v[ijk    ]) * interp4c(v[ijk-jj2], v[ijk-jj1], v[ijk    ], v[ijk+jj1]) ) * dyi
 
-                    - (- rhorefh[k  ] * interp2(w[ijk-jj1    ], w[ijk    ]) * interp2(v[ijk-kk1], v[ijk    ]) ) / rhoref[k] * dzi[k];
+                    - (  rhorefh[k+1] * interp2(w[ijk-jj1+kk1], w[ijk+kk1]) * interp2(v[ijk    ], v[ijk+kk1])
+                       - rhorefh[k  ] * interp2(w[ijk-jj1    ], w[ijk    ]) * interp2(v[ijk-kk1], v[ijk    ]) ) / rhoref[k] * dzi[k];
             }
             else
             {
@@ -336,7 +338,8 @@ namespace
                     - (  v[ijk+jj1] * interp4c(s[ijk-jj1], s[ijk    ], s[ijk+jj1], s[ijk+jj2])
                        - v[ijk    ] * interp4c(s[ijk-jj2], s[ijk-jj1], s[ijk    ], s[ijk+jj1]) ) * dyi
 
-                    - (- rhorefh[k  ] * w[ijk    ] * interp2(s[ijk-kk1], s[ijk    ]) ) / rhoref[k] * dzi[k];
+                    - (  rhorefh[k+1] * w[ijk+kk1] * interp2(s[ijk    ], s[ijk+kk1])
+                       - rhorefh[k  ] * w[ijk    ] * interp2(s[ijk-kk1], s[ijk    ]) ) / rhoref[k] * dzi[k];
             }
             else
             {

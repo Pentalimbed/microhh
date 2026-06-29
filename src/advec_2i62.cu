@@ -314,7 +314,7 @@ namespace
             else if (k == kend-1)
             {
                 st[ijk] +=
-                         - (
+                         - ( rhorefh[k+1] * flux_lim_top_g(w[ijk+kk1], s[ijk-kk1], s[ijk    ], s[ijk+kk1], s[ijk+kk2])
                            - rhorefh[k  ] * flux_lim_top_g(w[ijk    ], s[ijk-kk2], s[ijk-kk1], s[ijk    ], s[ijk+kk1]) ) / rhoref[k] * dzi[k];
             }
         }

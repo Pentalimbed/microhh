@@ -272,8 +272,9 @@ namespace
             {
                 const int ijk = i + j*jj1 + k*kk1;
                 ut[ijk] +=
-                        // w*du/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - ( -rhorefh[k] * interp2(w[ijk-ii1    ], w[ijk    ]) * interp2(u[ijk-kk1], u[ijk    ]) ) / rhoref[k] * dzi[k];
+                        // w*du/dz -> second order interpolation for fluxbot and fluxtop
+                        - ( rhorefh[k+1] * interp2(w[ijk-ii1+kk1], w[ijk+kk1]) * interp2(u[ijk    ], u[ijk+kk1])
+                          - rhorefh[k  ] * interp2(w[ijk-ii1    ], w[ijk    ]) * interp2(u[ijk-kk1], u[ijk    ]) ) / rhoref[k] * dzi[k];
             }
     }
 
@@ -403,8 +404,9 @@ namespace
             {
                 const int ijk = i + j*jj1 + k*kk1;
                 vt[ijk] +=
-                        // w*dv/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - ( -rhorefh[k  ] * interp2(w[ijk-jj1    ], w[ijk    ]) * interp2(v[ijk-kk1], v[ijk    ]) ) / rhoref[k] * dzi[k];
+                        // w*dv/dz -> second order interpolation for fluxbot and fluxtop
+                        - ( rhorefh[k+1] * interp2(w[ijk-jj1+kk1], w[ijk+kk1]) * interp2(v[ijk    ], v[ijk+kk1])
+                          - rhorefh[k  ] * interp2(w[ijk-jj1    ], w[ijk    ]) * interp2(v[ijk-kk1], v[ijk    ]) ) / rhoref[k] * dzi[k];
             }
     }
 
@@ -643,8 +645,9 @@ namespace
             {
                 const int ijk = i + j*jj1 + k*kk1;
                 st[ijk] +=
-                        // w*ds/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - (- rhorefh[k  ] * w[ijk    ] * interp2(s[ijk-kk1], s[ijk    ]) ) / rhoref[k] * dzi[k];
+                        // w*ds/dz -> second order interpolation for fluxbot and fluxtop
+                        - ( rhorefh[k+1] * w[ijk+kk1] * interp2(s[ijk    ], s[ijk+kk1])
+                          - rhorefh[k  ] * w[ijk    ] * interp2(s[ijk-kk1], s[ijk    ]) ) / rhoref[k] * dzi[k];
             }
     }
 
@@ -703,7 +706,7 @@ namespace
             {
                 const int ijk = i + j*jj + k*kk;
                 st[ijk] = interp2(w[ijk-ii1], w[ijk]) * interp2(s[ijk-kk1], s[ijk]);
-                st[ijk+kk1] = 0; // Impose no flux through top wall.
+                st[ijk+kk1] = interp2(w[ijk-ii1+kk1], w[ijk+kk1]) * interp2(s[ijk], s[ijk+kk1]);
             }
     }
 
@@ -762,7 +765,7 @@ namespace
             {
                 const int ijk = i + j*jj + k*kk;
                 st[ijk] = interp2(w[ijk-jj1], w[ijk]) * interp2(s[ijk-kk1], s[ijk]);
-                st[ijk+kk1] = 0; // Impose no flux through top wall.
+                st[ijk+kk1] = interp2(w[ijk-jj1+kk1], w[ijk+kk1]) * interp2(s[ijk], s[ijk+kk1]);
             }
     }
 
@@ -839,7 +842,7 @@ namespace
             {
                 const int ijk = i + j*jj + k*kk;
                 st[ijk] = w[ijk] * interp2(s[ijk-kk1], s[ijk]);
-                st[ijk+kk1] = 0; // Impose no flux through top wall.
+                st[ijk+kk1] = w[ijk+kk1] * interp2(s[ijk], s[ijk+kk1]);
             }
     }
 }
