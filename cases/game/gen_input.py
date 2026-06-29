@@ -552,7 +552,7 @@ if __name__ == '__main__':
     """
     Case switches.
     """
-    TF = np.float64              # Switch between double (float64) and single (float32) precision.
+    TF = np.float32              # Switch between double (float64) and single (float32) precision.
     use_htessel = True           # False = prescribed surface H+LE fluxes from ERA5.
     use_rrtmgp = True            # False = prescribed surface radiation from ERA5.
     use_rt = False               # False = 2stream solver for shortwave down, True = raytracer.
@@ -600,11 +600,11 @@ if __name__ == '__main__':
     zgrid = ls2d.grid.Grid_linear_stretched(kmax=200, dz0=12, alpha=0.01)
     gd = calc_vertical_grid_2nd(zgrid.z, zgrid.zsize)
 
-    itot = 600
-    jtot = 600
+    itot = 500
+    jtot = 500
 
-    xsize = 9000
-    ysize = 9000
+    xsize = 6000
+    ysize = 6000
 
     # Create input files.
     create_case_input(
