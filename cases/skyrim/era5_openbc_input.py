@@ -114,8 +114,8 @@ dom0 = Domain(
 
 # Inner domains(s), nested in parent LES domain.
 dom1 = Domain(
-    xsize = 4800,
-    ysize = 4800,
+    xsize = 6000,
+    ysize = 6000,
     itot = 400,
     jtot = 400,
     n_ghost = 3,

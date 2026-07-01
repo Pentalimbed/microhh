@@ -2,7 +2,7 @@ set -euo pipefail
 
 # Cleanup!
 mkdir -p dom0
-rm ./dom0/*
+rm ./dom0/* || true
 ln -sf ../../../build/microhh dom0/microhh
 
 base_dir=$(pwd) 
