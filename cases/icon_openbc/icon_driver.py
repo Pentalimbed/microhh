@@ -42,8 +42,9 @@ MODEL = "icon-eu"
 GRID = "regular-lat-lon"
 AREA = "europe"
 
-REQUIRED_MODEL_FIELDS = ("T", "QV", "U", "V", "W", "P")
-OPTIONAL_MODEL_FIELDS = ()
+REQUIRED_MODEL_FIELDS = ("T", "QV", "U", "V", "P")
+W_FIELD = "W"
+OPTIONAL_MODEL_FIELDS = ("QC", "QI")
 OPTIONAL_SINGLE_LEVEL_FIELDS = ("PS", "T_G", "T_2M")
 HHL_FIELD = "HHL"
 DEFAULT_MODEL_LEVELS = "auto"
@@ -155,6 +156,7 @@ class IconDriver:
         else:
             self._check_contiguous_levels(self.model_levels, "model_levels")
         self.hhl_levels = self._hhl_levels_for_model_levels(self.model_levels)
+        self.w_levels = None
 
         self.datetime = self.valid_dates
         self.time_sec = np.array(
@@ -241,6 +243,7 @@ class IconDriver:
         Download missing files, read ICON fields, and calculate derived fields.
         """
         model_fields = {field: [] for field in REQUIRED_MODEL_FIELDS}
+        w_fields = []
         optional_model_fields = {field: [] for field in OPTIONAL_MODEL_FIELDS}
         single_level_fields = {field: [] for field in OPTIONAL_SINGLE_LEVEL_FIELDS}
 
@@ -256,6 +259,11 @@ class IconDriver:
                 model_fields[field].append(grib.values)
                 attrs[field] = grib.attrs
                 self._store_grid(grib)
+
+            grib = self._read_w_field(lead)
+            w_fields.append(grib.values)
+            attrs[W_FIELD] = grib.attrs
+            self._store_grid(grib)
 
             for field in OPTIONAL_MODEL_FIELDS:
                 grib = self._read_model_field(field, lead, required=False)
@@ -281,28 +289,32 @@ class IconDriver:
         self.qv = np.stack(model_fields["QV"]).astype(np.float64)
         self.u = np.stack(model_fields["U"]).astype(np.float64)
         self.v = np.stack(model_fields["V"]).astype(np.float64)
-        self.w = np.stack(model_fields["W"]).astype(np.float64)
+        self.w = np.stack(w_fields).astype(np.float64)
         self.p = self._to_pa(np.stack(model_fields["P"]).astype(np.float64), attrs.get("P", {}))
 
         self._orient_model_levels()
 
         self.qc = self._optional_stack(optional_model_fields.get("QC"), like=self.qv)
+        self.qi = self._optional_stack(optional_model_fields.get("QI"), like=self.qv)
         self.hhl = np.repeat(hhl_values[np.newaxis, :, :, :], len(self.valid_dates), axis=0)
 
-        self._align_w_levels()
+        self._align_w_levels(attrs.get(W_FIELD, {}))
         self.z = self._calculate_heights()
 
         self.ps = self._surface_pressure(single_level_fields.get("PS"))
         self.surface_temperature = self._surface_temperature(single_level_fields)
 
         self.ql = self.qc
-        self.qt = self.qv + self.ql
+        self.qt = self.qv + self.ql + self.qi
         self.exn = (self.p / cst.p0) ** (cst.Rd / cst.cp)
-        self.thl = self.T / self.exn - cst.Lv / (cst.cp * self.exn) * self.ql
+        self.thl = (
+            self.T / self.exn
+            - cst.Lv / (cst.cp * self.exn) * self.ql
+            - cst.Ls / (cst.cp * self.exn) * self.qi)
 
-        self.Tv = self.T * (1.0 + (cst.Rv / cst.Rd - 1.0) * self.qv - self.ql)
+        self.Tv = self.T * (1.0 + (cst.Rv / cst.Rd - 1.0) * self.qv - self.ql - self.qi)
         self.rho = self.p / (cst.Rd * self.Tv)
-        self.wls = self._vertical_velocity_ms(attrs.get("W", {}))
+        self.wls = self._vertical_velocity_ms(attrs.get(W_FIELD, {}))
 
         self.fc = 2.0 * cst.e_rot * np.sin(np.deg2rad(self.central_lat))
 
@@ -586,7 +598,10 @@ class IconDriver:
 
             except requests.RequestException as exc:
                 if attempt + 1 == self.download_retries:
-                    raise
+                    if required:
+                        raise
+                    logger.warning(f"Optional ICON download failed; skipping {url}: {exc}")
+                    return False
 
                 wait = 2 ** attempt
                 logger.warning(
@@ -596,6 +611,26 @@ class IconDriver:
 
     def _read_model_field(self, field, lead, required):
         return self._read_model_field_at_levels(field, lead, self.model_levels, required)
+
+    def _read_w_field(self, lead):
+        """
+        ICON geometric vertical velocity is stored on generalVertical levels.
+        Prefer the half-level range bounding the selected full model layers, then
+        center adjacent half-level values onto the full-level grid used by MicroHH.
+        """
+        if self.w_levels is not None:
+            return self._read_model_field_at_levels(W_FIELD, lead, self.w_levels, required=True)
+
+        grib = self._read_model_field_at_levels(W_FIELD, lead, self.hhl_levels, required=False)
+        if grib is not None:
+            self.w_levels = self.hhl_levels
+            return grib
+
+        logger.warning(
+            "Could not read ICON W on the selected HHL half-level range; "
+            "falling back to selected model levels.")
+        self.w_levels = self.model_levels
+        return self._read_model_field_at_levels(W_FIELD, lead, self.w_levels, required=True)
 
     def _read_model_field_at_levels(self, field, lead, levels, required):
         fields = []
@@ -747,11 +782,18 @@ class IconDriver:
         self.w = self.w[:, ::-1, :, :]
         self.p = self.p[:, ::-1, :, :]
 
-    def _align_w_levels(self):
+    def _align_w_levels(self, attrs):
         if self.w.shape[1] == self.p.shape[1] + 1:
             self.w = 0.5 * (self.w[:, :-1, :, :] + self.w[:, 1:, :, :])
         elif self.w.shape[1] != self.p.shape[1]:
             raise ValueError(f"Unexpected ICON W level count: {self.w.shape[1]} for P count {self.p.shape[1]}")
+        elif attrs.get("GRIB_typeOfLevel") == "generalVertical":
+            logger.warning(
+                "ICON W is on generalVertical levels, but only one W value per full level was read. "
+                "Centering adjacent W levels and copying the top available W level.")
+            w_centered = self.w.copy()
+            w_centered[:, :-1, :, :] = 0.5 * (self.w[:, :-1, :, :] + self.w[:, 1:, :, :])
+            self.w = w_centered
 
     def _calculate_heights(self):
         if self.hhl is not None:
@@ -771,7 +813,7 @@ class IconDriver:
 
     def _hypsometric_heights(self):
         z = np.zeros_like(self.p)
-        tv = self.T * (1.0 + (cst.Rv / cst.Rd - 1.0) * self.qv - self.qc)
+        tv = self.T * (1.0 + (cst.Rv / cst.Rd - 1.0) * self.qv - self.qc - self.qi)
 
         for k in range(1, self.p.shape[1]):
             tv_mean = 0.5 * (tv[:, k - 1, :, :] + tv[:, k, :, :])
@@ -786,7 +828,7 @@ class IconDriver:
         return self._to_pa(np.stack(ps_values).astype(np.float64), {})
 
     def _surface_temperature(self, single_level_fields):
-        for field in ("T_G", "T_2M"):
+        for field in ("T_2M", "T_G"):
             values = single_level_fields.get(field)
             if values is not None:
                 return np.stack(values).astype(np.float64)

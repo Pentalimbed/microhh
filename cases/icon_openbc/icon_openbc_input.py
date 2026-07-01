@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 import argparse
 import glob
+import re
 
 import netCDF4 as nc4
 import numpy as np
@@ -45,11 +46,67 @@ logger.setLevel("DEBUG")
 case_dir = Path(__file__).resolve().parent
 repo_root = case_dir.parents[1]
 
+
+def _extrapolate_profile_to_surface(profile, z):
+    return profile[0] - z[0] * (profile[1] - profile[0]) / (z[1] - z[0])
+
+
+def _log_range(name, values, units=""):
+    values = np.asarray(values)
+    logger.info(
+        f"{name}: min={np.nanmin(values):.6g}, "
+        f"mean={np.nanmean(values):.6g}, max={np.nanmax(values):.6g} {units}".rstrip())
+
+
+def _crop_horizontal_buffer_files(output_dir, domain, gd, zstart_buffer, float_type):
+    """
+    The current MicroHH 3D buffer reader expects scalar-shaped 3D files for all
+    buffer variables. microhhpy writes horizontally staggered u/v buffers, so
+    crop those case-local files back to the scalar restart layout.
+    """
+    kstart_buffer = int(np.where(gd["z"] >= zstart_buffer)[0][0])
+    ksize = gd["ktot"] - kstart_buffer
+    expected = ksize * domain.jtot * domain.itot
+
+    patterns = {
+        "u": (domain.jtot, domain.itot),
+        "v": (domain.jtot, domain.itot),
+    }
+
+    for name, (jtot, itot) in patterns.items():
+        for path in sorted(output_dir.glob(f"{name}_buffer.*")):
+            if not re.search(r"\.\d{7}$", path.name):
+                continue
+
+            data = np.fromfile(path, dtype=float_type)
+            if data.size == expected:
+                continue
+
+            original_size = data.size
+            if name == "u" and data.size % (ksize * jtot) == 0:
+                nx = data.size // (ksize * jtot)
+                if nx < itot:
+                    raise ValueError(f"{path} has too few x points for a scalar buffer")
+                data = data.reshape(ksize, jtot, nx)[:, :, :itot]
+            elif name == "v" and data.size % (ksize * itot) == 0:
+                ny = data.size // (ksize * itot)
+                if ny < jtot:
+                    raise ValueError(f"{path} has too few y points for a scalar buffer")
+                data = data.reshape(ksize, ny, itot)[:, :jtot, :]
+            else:
+                raise ValueError(f"Unexpected {path.name} size {data.size}; expected {expected}")
+
+            logger.info(f"Cropping {path.name} from {original_size} to {expected} values")
+            data.astype(float_type, copy=False).tofile(path)
+
 """
 User input
 """
 parser = argparse.ArgumentParser(description="Nested ICON-EU open-boundary input.")
 parser.add_argument("-d", "--domain", type=int, required=True, help="Domain number")
+parser.add_argument("--no-download", action="store_true", help="Only use locally cached ICON files")
+parser.add_argument("--work-dir", type=Path, default=Path("test"), help="Output directory for domX folders")
+parser.add_argument("--icon-init-date", type=str, default=None, help="ICON cycle, e.g. 2026-06-27T12")
 args = parser.parse_args()
 
 
@@ -62,13 +119,13 @@ start_date = datetime(year=2026, month=6, day=27, hour=15)
 end_date = datetime(year=2026, month=6, day=27, hour=17)
 
 # Latest available ICON forecast cycle that covers the full range is selected automatically.
-icon_init_date = None
-download_missing = True
+icon_init_date = datetime.fromisoformat(args.icon_init_date) if args.icon_init_date else None
+download_missing = not args.no_download
 ntasks = 8
 icon_model_levels = "auto"
 
 # All domains are put in a sub-folder `work_dir/domX`.
-work_dir = Path("test")
+work_dir = args.work_dir
 
 # ICON-EU settings. The default location is Cabauw, which is inside ICON-EU.
 settings = {
@@ -150,6 +207,15 @@ icon.read_data()
 icon.calculate_forcings(n_av=3, method="2nd")
 icon_1d = icon.get_les_input(gd["z"])
 
+_log_range("ICON u", icon.u, "m s-1")
+_log_range("ICON v", icon.v, "m s-1")
+_log_range("ICON w", icon.wls, "m s-1")
+_log_range("ICON thl", icon.thl, "K")
+_log_range("ICON qt", icon.qt, "kg kg-1")
+_log_range("ICON ql+qi from input", icon.ql + icon.qi, "kg kg-1")
+if np.nanmax(icon.ql + icon.qi) == 0:
+    logger.warning("No ICON cloud condensate was found/read; qt is based on water vapour only.")
+
 
 """
 Default vertical profile input.
@@ -185,12 +251,16 @@ qt = icon_1d.qt.mean(axis=0).values
 stop_thl = (thl[-1] - thl[-2]) / (gd["z"][-1] - gd["z"][-2])
 stop_qt = (qt[-1] - qt[-2]) / (gd["z"][-1] - gd["z"][-2])
 
-surface_temperature = float(icon_1d.sst.mean())
 ps = float(icon_1d.ps.mean())
 
 # Dirichlet lower boundary condition.
-sbot_thl = surface_temperature / thermo.exner(ps)
-sbot_qt = 0.95 * thermo.qsat(ps, surface_temperature)
+sbot_thl = _extrapolate_profile_to_surface(thl, gd["z"])
+sbot_qt = max(0.0, _extrapolate_profile_to_surface(qt, gd["z"]))
+surface_temperature = sbot_thl * thermo.exner(ps)
+
+_log_range("ICON profile surface thl", sbot_thl, "K")
+_log_range("ICON profile surface qt", sbot_qt, "kg kg-1")
+_log_range("ICON profile surface temperature", surface_temperature, "K")
 
 
 """
@@ -229,7 +299,7 @@ if args.domain == 0:
     ini["boundary_lateral"]["slist"] = ["thl", "qt"]
     ini["buffer"]["loadfreq"] = 3600
 else:
-    ini["boundary_lateral"]["slist"] = ["thl", "qt", "qr", "nr"]
+    ini["boundary_lateral"]["slist"] = ["thl", "qt", "qr", "qs", "qg"]
     ini["buffer"]["loadfreq"] = 600
 
 # Output LBCs for child domain.
@@ -294,7 +364,8 @@ if args.domain == 0:
     time_icon = icon.time_sec
 
     # Standard dev. of Gaussian filter applied to interpolated fields (m).
-    sigma_h = 10_000
+    # Keep this below the ICON-EU grid spacing; 10 km over-smooths a 12 km LES domain.
+    sigma_h = max(dom0.xsize, dom0.ysize) / 10
 
     create_input_from_regular_latlon(
         fields_icon,
@@ -318,6 +389,8 @@ if args.domain == 0:
         ntasks=ntasks,
         float_type=float_type)
 
+    _crop_horizontal_buffer_files(exp_dir, dom0, gd, zstart_buffer, float_type)
+
 else:
     """
     Regrid initial fields, and copy boundary conditions from parent domain.
@@ -333,7 +406,8 @@ else:
         "thl": 0,
         "qt": 0,
         "qr": 0,
-        "nr": 0,
+        "qs": 0,
+        "qg": 0,
     }
 
     fields_2d = {

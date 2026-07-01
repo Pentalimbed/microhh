@@ -18,11 +18,11 @@ sw_openbc=true
 
 [advec]
 swadvec=2i4
-cflmax=1.3
+cflmax=1.4
 
 [diff]
 swdiff=smag2
-dnmax=0.3
+dnmax=0.4
 
 [thermo]
 swbasestate=anelastic
@@ -35,14 +35,14 @@ swtimedepphydro_3d=true
 loadfreq=3600
 
 [micro]
-swmicro=2mom_warm
-swmicrobudget=0
+swmicro=nsw6
 cflmax=1.2
 Nc0=70e6
+Ni0=1e5
 
 [force]
 swlspres=geo
-fc=None
+fc=4.481e-5
 swwls=mean
 
 [boundary]
@@ -122,9 +122,9 @@ loadfreq=None
 [time]
 endtime=None
 dt=6.
-dtmax=30
-savetime=3600
-outputiter=10
+dtmax=60
+savetime=1800
+outputiter=20
 adaptivestep=true
 starttime=0
 rkorder=4
@@ -142,7 +142,7 @@ xz=None
 yz=None
 
 [limiter]
-limitlist=qt,qr,nr
+limitlist=qt,qr,qs,qg
 
 [dump]
 swdump=1

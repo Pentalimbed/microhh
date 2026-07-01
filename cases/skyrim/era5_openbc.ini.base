@@ -94,7 +94,7 @@ yend=-1
 grid_ratio_ij=-1
 grid_ratio_k=-1
 n_ghost=-1
-n_sponge-1
+n_sponge=-1
 savetime_bcs=-1
 savetime_buffer=-1
 zstart_buffer=-1
