@@ -7,3 +7,6 @@ build/
 config/default.cmake
 .venv/
 .cache/
+
+*.00*
+data/
