@@ -1,7 +1,9 @@
+set -euo pipefail
+
 # Cleanup!
 mkdir -p dom1
 rm ./dom1/*
-cp microhh dom1
+ln -sf ../../../build/microhh dom1/microhh
 
 base_dir=$(pwd) 
 nproc=8

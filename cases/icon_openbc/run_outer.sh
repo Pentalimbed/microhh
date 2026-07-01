@@ -2,8 +2,7 @@ set -euo pipefail
 
 # Cleanup!
 mkdir -p test/dom0
-rm -f test/dom0/*00*
-rm -f test/dom0/*.nc
+rm -f test/dom0/*
 ln -sf ../../../../build/microhh test/dom0/microhh
 
 base_dir=$(pwd) 
@@ -13,7 +12,7 @@ uv run python icon_openbc_input.py --domain=0
 
 cd test/dom0
 
-mpiexec -n $nproc ./microhh init icon_openbc
+./microhh init icon_openbc
 
 find . -maxdepth 1 -type f -name '*_overwrite*' | while read -r file; do
     newname="${file/_overwrite/}"
@@ -21,7 +20,7 @@ find . -maxdepth 1 -type f -name '*_overwrite*' | while read -r file; do
     mv "$file" "$newname"
 done
 
-mpiexec -n $nproc ./microhh run icon_openbc
+./microhh run icon_openbc
 
 # python cross_to_nc.py -n 12
 

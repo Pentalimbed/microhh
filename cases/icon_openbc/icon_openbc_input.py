@@ -58,8 +58,8 @@ Settings
 """
 float_type = np.float32
 
-start_date = datetime(year=2026, month=2, day=11, hour=0)
-end_date = datetime(year=2026, month=2, day=11, hour=2)
+start_date = datetime(year=2026, month=6, day=27, hour=15)
+end_date = datetime(year=2026, month=6, day=27, hour=17)
 
 # Latest available ICON forecast cycle that covers the full range is selected automatically.
 icon_init_date = None
@@ -75,10 +75,10 @@ settings = {
     "start_date": start_date,
     "end_date": end_date,
     "icon_init_date": icon_init_date,
-    "central_lon": 4.927,
-    "central_lat": 51.971,
+    "central_lon": 5.1491471,
+    "central_lat": 52.1528414,
     "area_size": 1.5,
-    "case_name": "cabauw_icon",
+    "case_name": "maartensdijk-260627",
     "icon_path": repo_root / "data" / "ICON",
     "download_missing": download_missing,
     "model_levels": icon_model_levels,
@@ -105,10 +105,10 @@ Define projection used for LES coordinates (m) to real world (lat/lon) transform
 """
 # Outer domain, nested in ICON-EU.
 dom0 = Domain(
-    xsize=64_000,
-    ysize=64_000,
-    itot=64,
-    jtot=64,
+    xsize=12_000,
+    ysize=12_000,
+    itot=100,
+    jtot=100,
     n_ghost=3,
     n_sponge=5,
     lbc_freq=3600,
@@ -120,13 +120,13 @@ dom0 = Domain(
 
 # Inner domains(s), nested in parent LES domain.
 dom1 = Domain(
-    xsize=32_000,
-    ysize=32_000,
-    itot=64,
-    jtot=64,
+    xsize=4800,
+    ysize=4800,
+    itot=100,
+    jtot=100,
     n_ghost=3,
     n_sponge=3,
-    lbc_freq=60,
+    lbc_freq=360,
     center_in_parent=True,
     parent=dom0,
 )

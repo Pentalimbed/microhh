@@ -1,6 +1,6 @@
 [master]
-npx=2
-npy=2
+npx=1
+npy=1
 
 [grid]
 itot=None
@@ -17,7 +17,7 @@ swspatialorder=2
 sw_openbc=true
 
 [advec]
-swadvec=2i5
+swadvec=2i4
 cflmax=1.3
 
 [diff]
@@ -130,11 +130,11 @@ starttime=0
 rkorder=4
 
 [stats]
-swstats=1
+swstats=0
 sampletime=60
 
 [cross]
-swcross=1
+swcross=0
 sampletime=60
 crosslist=u,v,w,thl,qt,ql_path,qr_path,rr_bot
 xy=10,100,500,1000,1500,2500
@@ -143,3 +143,8 @@ yz=None
 
 [limiter]
 limitlist=qt,qr,nr
+
+[dump]
+swdump=1
+sampletime=360
+dumplist=ql,qi,u,v,w
