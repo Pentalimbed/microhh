@@ -760,37 +760,6 @@ namespace
     }
 
     template<typename TF>
-    TF shift_wtop_2d_mean(
-            std::vector<TF>& w_top_2d,
-            const TF w_top_mean,
-            const Grid_data<TF>& gd,
-            Master& master)
-    {
-        double w_top_sum = 0.;
-
-        for (int j=gd.jstart; j<gd.jend; ++j)
-            for (int i=gd.istart; i<gd.iend; ++i)
-            {
-                const int ij = i + j*gd.icells;
-                w_top_sum += w_top_2d[ij];
-            }
-
-        master.sum(&w_top_sum, 1);
-
-        const TF w_top_2d_mean = static_cast<TF>(w_top_sum / (gd.itot * gd.jtot));
-        const TF w_top_delta = w_top_mean - w_top_2d_mean;
-
-        for (int j=gd.jstart; j<gd.jend; ++j)
-            for (int i=gd.istart; i<gd.iend; ++i)
-            {
-                const int ij = i + j*gd.icells;
-                w_top_2d[ij] += w_top_delta;
-            }
-
-        return w_top_2d_mean;
-    }
-
-    template<typename TF>
     bool is_equal(const TF a, const TF b)
     {
         const TF epsilon = std::max(TF(10) * std::numeric_limits<TF>::epsilon(), std::max(std::abs(a), std::abs(b)) * TF(10) * std::numeric_limits<TF>::epsilon());
@@ -1241,16 +1210,7 @@ void Boundary_lateral<TF>::create(
         read_lbc(div_u, div_v, lbc_w, lbc_e, lbc_s, lbc_n, iotime);
 
         if (sw_wtop_2d)
-        {
             read_xy_slice(w_top_2d, "w_top", 0);
-            const TF w_top_mean = -(div_u + div_v) / (fields.rhorefh[gd.kend] * gd.xsize * gd.ysize);
-            const TF w_top_2d_mean = shift_wtop_2d_mean(w_top_2d, w_top_mean, gd, master);
-
-            std::string message =
-                    "- adjusted mean(w_top_2d) = " + std::to_string(w_top_2d_mean*100)
-                  + " -> " + std::to_string(w_top_mean*100) + " cm/s";
-            master.print_message(message);
-        }
         else
         {
             const TF w_top_mean = -(div_u + div_v) / (fields.rhorefh[gd.kend] * gd.xsize * gd.ysize);
@@ -1296,24 +1256,6 @@ void Boundary_lateral<TF>::create(
         {
             read_xy_slice(w_top_2d_prev, "w_top", prev_iotime);
             read_xy_slice(w_top_2d_next, "w_top", next_iotime);
-
-            const TF w_top_prev_mean = -(div_u_prev + div_v_prev) / (fields.rhorefh[gd.kend] * gd.xsize * gd.ysize);
-            const TF w_top_next_mean = -(div_u_next + div_v_next) / (fields.rhorefh[gd.kend] * gd.xsize * gd.ysize);
-
-            const TF w_top_2d_prev_mean = shift_wtop_2d_mean(w_top_2d_prev, w_top_prev_mean, gd, master);
-            const TF w_top_2d_next_mean = shift_wtop_2d_mean(w_top_2d_next, w_top_next_mean, gd, master);
-
-            std::string message1 =
-                    "- adjusted mean(w_top_2d) = " + std::to_string(w_top_2d_prev_mean*100)
-                    + " -> " + std::to_string(w_top_prev_mean*100)
-                    + " cm/s @ t= " + std::to_string(prev_index*loadfreq) + " sec.";
-            master.print_message(message1);
-
-            std::string message2 =
-                    "- adjusted mean(w_top_2d) = " + std::to_string(w_top_2d_next_mean*100)
-                    + " -> " + std::to_string(w_top_next_mean*100)
-                    + " cm/s @ t= " + std::to_string(next_index*loadfreq) + " sec.";
-            master.print_message(message2);
         }
         else
         {
@@ -1729,15 +1671,6 @@ void Boundary_lateral<TF>::update_time_dependent(
             {
                 w_top_2d_prev = w_top_2d_next;
                 read_xy_slice(w_top_2d_next, "w_top", next_iotime);
-
-                const TF w_top_next_mean = -(div_u_next + div_v_next) / (fields.rhorefh[gd.kend] * gd.xsize * gd.ysize);
-                const TF w_top_2d_next_mean = shift_wtop_2d_mean(w_top_2d_next, w_top_next_mean, gd, master);
-
-                std::string message =
-                        "- adjusted mean(w_top_2d) = " + std::to_string(w_top_2d_next_mean*100)
-                        + " -> " + std::to_string(w_top_next_mean*100)
-                        + " cm/s @ t= " + std::to_string(next_index*loadfreq) + " sec.";
-                master.print_message(message);
             }
             else
             {
