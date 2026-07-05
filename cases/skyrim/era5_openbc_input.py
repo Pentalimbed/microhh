@@ -87,8 +87,8 @@ NOTE: vertical grid definition in (LS)2D is not identical to MicroHH's grid.
       matches the one from MicroHH, otherwise the initial fields won't be divergence free.
 """
 # _g = ls2d.grid.Grid_linear_stretched(kmax=128, dz0=20, alpha=0.01)
-_g = ls2d.grid.Grid_linear_stretched(kmax=200, dz0=12, alpha=0.01)
-# _g = ls2d.grid.Grid_equidist(kmax=400, dz0=12)
+# _g = ls2d.grid.Grid_linear_stretched(kmax=200, dz0=12, alpha=0.01)
+_g = ls2d.grid.Grid_equidist(kmax=150, dz0=108)
 gd = calc_vertical_grid_2nd(_g.z, _g.zsize)
 
 zstart_buffer = 0.75 * gd['zsize']
@@ -99,10 +99,10 @@ Define projection used for LES coordinates (m) to real world (lat/lon) transform
 """
 # Outer domain, nested in ERA5.
 dom0 = Domain(
-    xsize=12000,
-    ysize=12000,
-    itot=400,
-    jtot=400,
+    xsize=420 * 108,
+    ysize=420 * 108,
+    itot=420,
+    jtot=420,
     n_ghost=3,
     n_sponge=5,
     lbc_freq=3600,                  # Always 3600 for ERA5!
@@ -114,10 +114,10 @@ dom0 = Domain(
 
 # Inner domains(s), nested in parent LES domain.
 dom1 = Domain(
-    xsize = 6000,
-    ysize = 6000,
-    itot = 400,
-    jtot = 400,
+    xsize = 15120,
+    ysize = 15120,
+    itot = 420,
+    jtot = 420,
     n_ghost = 3,
     n_sponge = 3,
     lbc_freq = 360,
@@ -248,8 +248,8 @@ ini['boundary_lateral']['loadfreq'] = domain.lbc_freq
 
 # Hack; how to best define this.
 if args.domain == 0:
-    # ini['boundary_lateral']['slist'] = ['thl', 'qt']  # this is problematic
-    ini['boundary_lateral'].pop('slist', None)
+    ini['boundary_lateral']['slist'] = ['thl', 'qt']
+    # ini['boundary_lateral'].pop('slist', None)
     ini['buffer']['loadfreq'] = 3600
 else:
     ini['boundary_lateral']['slist'] = ['thl', 'qt', 'qr', 'qs', 'qg']

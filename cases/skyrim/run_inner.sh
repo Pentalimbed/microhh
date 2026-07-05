@@ -3,12 +3,12 @@ set -euo pipefail
 # Cleanup!
 mkdir -p dom1
 rm ./dom1/* || true
-ln -sf ../../../build/microhh dom1/microhh
+ln -sf "${MICROHH_BIN:-../../../build/microhh}" dom1/microhh
 
 base_dir=$(pwd) 
 nproc=8
 
-python era5_openbc_input.py --domain=1
+uv run era5_openbc_input.py --domain=1
 
 cd ./dom1
 
