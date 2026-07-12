@@ -1,0 +1,105 @@
+[case]
+microhh_name = "era5_openbc"
+base_ini = "era5_openbc.ini.base"
+work_dir = "."
+start = "2014-11-15T11:00:00Z"
+end = "2014-11-15T16:00:00Z"
+float_type = "float32"
+swmicro = "nsw6"
+npx = 1
+npy = 1
+ntasks = 8
+sigma_h = 1000.0
+perturb_size = 4
+perturb_max_height = 0.0
+clip_at_zero = ["qt"]
+
+[case.perturb_amplitude]
+thl = 0.1
+qt = 0.0001
+
+[era5]
+download = true
+data_dir = "era5"
+file_prefix = "nested"
+central_lon = -5.235
+central_lat = 50.159167
+area_size = 5.0
+proj_str = "+proj=utm +zone=31 +datum=WGS84 +units=m +no_defs +type=crs"
+n_av = 3
+data_format = "grib"
+download_format = "unarchived"
+api_format_key = "data_format"
+download_interval_hours = 1
+radiation_accumulation_seconds = 3600.0
+
+[radiation]
+# Options: "none", "prescribed", "rrtmgp", "rrtmgp_rt".
+scheme = "prescribed"
+swtimedep_background = false
+copy_coefficients = false
+gpt_set = "128_112"
+microhh_root = "../.."
+link_coefficients = true
+co2_vmr = 0.00042
+ch4_vmr = 0.0000019
+o3_vmr = 0.00000004
+rays_per_pixel = 128
+kngrid_i = 64
+kngrid_j = 64
+kngrid_k = 32
+
+[run]
+warmup_frequency = 600
+start = "2014-11-15T14:00:00Z"
+end = "2014-11-15T14:20:00Z"
+bcs_frequency = 30
+dump_frequency = 120
+
+[[domains]]
+name = "dom0"
+xsize = 145800
+ysize = 145800
+zsize = 14400
+itot = 450
+jtot = 450
+ktot = 200
+n_ghost = 3
+n_sponge = 3
+anchor = "center"
+
+[[domains]]
+name = "dom1"
+xsize = 48600
+ysize = 48600
+zsize = 14400
+itot = 450
+jtot = 450
+ktot = 200
+n_ghost = 3
+n_sponge = 3
+center_in_parent = true
+
+[[domains]]
+name = "dom2"
+xsize = 16200
+ysize = 16200
+zsize = 7200
+itot = 450
+jtot = 450
+ktot = 200
+n_ghost = 3
+n_sponge = 3
+center_in_parent = true
+
+[[domains]]
+name = "dom3"
+xsize = 5400
+ysize = 5400
+zsize = 2400
+itot = 450
+jtot = 450
+ktot = 200
+n_ghost = 3
+n_sponge = 3
+center_in_parent = true
