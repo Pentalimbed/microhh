@@ -1561,10 +1561,10 @@ void Boundary_surface_lsm<TF>::save(const int iotime, Thermo<TF>& thermo)
 
     // Lambda function to save 2D fields.
     auto save_2d_field = [&](
-            TF* const restrict field, const std::string& name)
+            TF* const restrict field, const std::string& name, const int itime)
     {
         char filename[256];
-        std::snprintf(filename, 256, "%s.%07d", name.c_str(), iotime);
+        std::snprintf(filename, 256, "%s.%07d", name.c_str(), itime);
         master.print_message("Saving \"%s\" ... ", filename);
 
         const int kslice = 0;
@@ -1579,10 +1579,10 @@ void Boundary_surface_lsm<TF>::save(const int iotime, Thermo<TF>& thermo)
     };
 
     // Lambda function to save the 3D soil fields.
-    auto save_3d_field = [&](TF* const restrict field, const std::string& name)
+    auto save_3d_field = [&](TF* const restrict field, const std::string& name, const int itime)
     {
         char filename[256];
-        std::snprintf(filename, 256, "%s.%07d", name.c_str(), iotime);
+        std::snprintf(filename, 256, "%s.%07d", name.c_str(), itime);
         master.print_message("Saving \"%s\" ... ", filename);
 
         if (field3d_io.save_field3d(
@@ -1599,27 +1599,27 @@ void Boundary_surface_lsm<TF>::save(const int iotime, Thermo<TF>& thermo)
 
     // MO gradients are always needed, as the calculation of the
     // eddy viscosity use the gradients from the previous time step.
-    save_2d_field(dudz_mo.data(), "dudz_mo");
-    save_2d_field(dvdz_mo.data(), "dvdz_mo");
-    save_2d_field(dbdz_mo.data(), "dbdz_mo");
+    save_2d_field(dudz_mo.data(), "dudz_mo", iotime);
+    save_2d_field(dvdz_mo.data(), "dvdz_mo", iotime);
+    save_2d_field(dbdz_mo.data(), "dbdz_mo", iotime);
 
     // Don't save the initial soil temperature/moisture for heterogeneous runs.
     if (sw_homogeneous || iotime > 0)
     {
-        save_3d_field(fields.sps.at("t")->fld.data(), "t_soil");
-        save_3d_field(fields.sps.at("theta")->fld.data(), "theta_soil");
+        save_3d_field(fields.sps.at("t")->fld.data(), "t_soil", iotime);
+        save_3d_field(fields.sps.at("theta")->fld.data(), "theta_soil", iotime);
     }
 
     // Surface fields.
-    save_2d_field(fields.ap2d.at("wl")->fld.data(), "wl_skin");
+    save_2d_field(fields.ap2d.at("wl")->fld.data(), "wl_skin", iotime);
 
     for (auto& tile : tiles)
     {
-        save_2d_field(tile.second.thl_bot.data(), "thl_bot_" + tile.first);
-        save_2d_field(tile.second.qt_bot.data(),  "qt_bot_"  + tile.first);
+        save_2d_field(tile.second.thl_bot.data(), "thl_bot_" + tile.first, iotime);
+        save_2d_field(tile.second.qt_bot.data(),  "qt_bot_"  + tile.first, iotime);
 
         if (!sw_constant_z0)
-            save_2d_field(tile.second.obuk.data(),  "obuk_"  + tile.first);
+            save_2d_field(tile.second.obuk.data(),  "obuk_"  + tile.first, iotime);
     }
 
     // Check for any failures.

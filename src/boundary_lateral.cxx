@@ -1570,28 +1570,28 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
     {
         const bool sw_recycle_fld = in_list<std::string>(fld, recycle_list);
 
-        if (md.mpicoordx == 0 && sw_recycle[Lbc_location::West])
+        if (md.mpicoordx == 0)
         {
             if (sw_recycle_fld && sw_recycle[Lbc_location::West])
                 sponge_layer_wrapper.template operator()<Lbc_location::West, true>(lbc_w, fld);
             else
                 sponge_layer_wrapper.template operator()<Lbc_location::West, false>(lbc_w, fld);
         }
-        if (md.mpicoordx == md.npx-1 && sw_recycle[Lbc_location::East])
+        if (md.mpicoordx == md.npx-1)
         {
             if (sw_recycle_fld && sw_recycle[Lbc_location::East])
                 sponge_layer_wrapper.template operator()<Lbc_location::East, true>(lbc_e, fld);
             else
                 sponge_layer_wrapper.template operator()<Lbc_location::East, false>(lbc_e, fld);
         }
-        if (md.mpicoordy == 0 && sw_recycle[Lbc_location::South])
+        if (md.mpicoordy == 0)
         {
             if (sw_recycle_fld && sw_recycle[Lbc_location::South])
                 sponge_layer_wrapper.template operator()<Lbc_location::South, true>(lbc_s, fld);
             else
                 sponge_layer_wrapper.template operator()<Lbc_location::South, false>(lbc_s, fld);
         }
-        if (md.mpicoordy == md.npy-1 && sw_recycle[Lbc_location::North])
+        if (md.mpicoordy == md.npy-1)
         {
             if (sw_recycle_fld && sw_recycle[Lbc_location::North])
                 sponge_layer_wrapper.template operator()<Lbc_location::North, true>(lbc_n, fld);

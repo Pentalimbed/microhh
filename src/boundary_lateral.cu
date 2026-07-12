@@ -920,28 +920,31 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
         const bool sw_recycle_fld =
                 std::find(recycle_list.begin(), recycle_list.end(), fld) != recycle_list.end();
 
-        if (sw_recycle_fld && sw_recycle[Lbc_location::West])
-            sponge_s_we.template operator()<Lbc_location::West, true>(lbc_w_g, fld);
-        else
-            sponge_s_we.template operator()<Lbc_location::West, false>(lbc_w_g, fld);
-
-        if (sw_recycle[Lbc_location::East])
+        if (md.mpicoordx == 0)
         {
-            if (sw_recycle_fld)
+            if (sw_recycle_fld && sw_recycle[Lbc_location::West])
+                sponge_s_we.template operator()<Lbc_location::West, true>(lbc_w_g, fld);
+            else
+                sponge_s_we.template operator()<Lbc_location::West, false>(lbc_w_g, fld);
+        }
+
+        if (md.mpicoordx == md.npx-1)
+        {
+            if (sw_recycle_fld && sw_recycle[Lbc_location::East])
                 sponge_s_we.template operator()<Lbc_location::East, true>(lbc_e_g, fld);
             else
                 sponge_s_we.template operator()<Lbc_location::East, false>(lbc_e_g, fld);
         }
-        if (sw_recycle[Lbc_location::South])
+        if (md.mpicoordy == 0)
         {
-            if (sw_recycle_fld)
+            if (sw_recycle_fld && sw_recycle[Lbc_location::South])
                 sponge_s_sn.template operator()<Lbc_location::South, true>(lbc_s_g, fld);
             else
                 sponge_s_sn.template operator()<Lbc_location::South, false>(lbc_s_g, fld);
         }
-        if (sw_recycle[Lbc_location::North])
+        if (md.mpicoordy == md.npy-1)
         {
-            if (sw_recycle_fld)
+            if (sw_recycle_fld && sw_recycle[Lbc_location::North])
                 sponge_s_sn.template operator()<Lbc_location::North, true>(lbc_n_g, fld);
             else
                 sponge_s_sn.template operator()<Lbc_location::North, false>(lbc_n_g, fld);
