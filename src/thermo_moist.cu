@@ -145,7 +145,7 @@ namespace
         return ans;
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool pressure_is_3d> __global__
     void calc_buoyancy_tend_2nd_g(TF* __restrict__ wt, TF* __restrict__ th, TF* __restrict__ qt,
                                   TF* __restrict__ thvrefh, TF* __restrict__ exnh, TF* __restrict__ ph,
                                   int istart, int jstart, int kstart,
@@ -164,11 +164,13 @@ namespace
             const TF thh = static_cast<TF>(0.5) * (th[ijk-kk] + th[ijk]); // Half level liq. water pot. temp.
             const TF qth = static_cast<TF>(0.5) * (qt[ijk-kk] + qt[ijk]); // Half level specific hum.
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, ph[k], exnh[k]);
+            const TF p_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exnh[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, p_loc, exn_loc);
 
             // Calculate tendency.
             if (ssa.ql + ssa.qi > 0)
-                wt[ijk] += buoyancy(exnh[k], thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
+                wt[ijk] += buoyancy(exn_loc, thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
             else
                 wt[ijk] += buoyancy_no_ql(thh, qth, thvrefh[k]);
         }
@@ -178,6 +180,7 @@ namespace
     void calc_buoyancy_g(TF* __restrict__ b,  TF* __restrict__ th,
                          TF* __restrict__ qt, TF* __restrict__ thvref,
                          TF* __restrict__ p,  TF* __restrict__ exn,
+                         const bool pressure_is_3d,
                          int istart, int jstart, int kstart,
                          int iend,   int jend,   int kcells,
                          int jj, int kk)
@@ -195,16 +198,18 @@ namespace
         {
             const int ijk = i + j*jj + k*kk;
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]);
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exn[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc);
 
             if (ssa.ql + ssa.qi > 0)
-                b[ijk] = buoyancy(exn[k], th[ijk], qt[ijk], ssa.ql, ssa.qi, thvref[k]);
+                b[ijk] = buoyancy(exn_loc, th[ijk], qt[ijk], ssa.ql, ssa.qi, thvref[k]);
             else
                 b[ijk] = buoyancy_no_ql(th[ijk], qt[ijk], thvref[k]);
         }
     }
 
-    template<typename TF> __global__
+    template<typename TF, bool pressure_is_3d> __global__
     void calc_buoyancy_h_g(TF* __restrict__ bh,  TF* __restrict__ th,
                          TF* __restrict__ qt, TF* __restrict__ thvrefh,
                          TF* __restrict__ ph,  TF* __restrict__ exnh,
@@ -216,22 +221,19 @@ namespace
         const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
         const int k = blockIdx.z + kstart;
 
-        if (i < iend && j < jend && k < kend)
+        if (i < iend && j < jend && k <= kend)
         {
             const int ijk = i + j*jj + k*kk;
-            const int kk  = i + j*jj;
 
             // Half level temperature and moisture content
             const TF thh = static_cast<TF>(0.5) * (th[ijk-kk] + th[ijk]); // Half level liq. water pot. temp.
             const TF qth = static_cast<TF>(0.5) * (qt[ijk-kk] + qt[ijk]); // Half level specific hum.
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, ph[k], exnh[k]);
+            const TF p_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exnh[k];
+            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, p_loc, exn_loc);
 
-            // Calculate tendency
-            if (ssa.ql + ssa.qi > 0)
-                bh[ijk] += buoyancy(exnh[k], thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
-            else
-                bh[ijk] += buoyancy_no_ql(thh, qth, thvrefh[k]);
+            bh[ijk] = buoyancy(exn_loc, thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
         }
     }
 
@@ -316,6 +318,7 @@ namespace
     template<typename TF> __global__
     void calc_liquid_water_g(TF* __restrict__ ql, TF* __restrict__ th, TF* __restrict__ qt,
                              TF* __restrict__ exn, TF* __restrict__ p,
+                             const bool pressure_is_3d,
                              int istart, int jstart, int kstart,
                              int iend,   int jend,   int kend,
                              int jj, int kk)
@@ -327,8 +330,41 @@ namespace
         if (i < iend && j < jend && k < kend)
         {
             const int ijk = i + j*jj + k*kk;
-            ql[ijk] = sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]).ql;
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exn[k];
+            ql[ijk] = sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc).ql;
         }
+    }
+
+    template<typename TF, Satadjust_field field> __global__
+    void calc_satadjust_field_g(
+            TF* const out,
+            const TF* const thl,
+            const TF* const qt,
+            const TF* const p,
+            const bool pressure_is_3d,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart, const int kend,
+            const int jstride, const int kstride)
+    {
+        const int i = blockIdx.x*blockDim.x+threadIdx.x+istart;
+        const int j = blockIdx.y*blockDim.y+threadIdx.y+jstart;
+        const int k = blockIdx.z+kstart;
+        if (i >= iend || j >= jend || k >= kend)
+            return;
+
+        const int ijk = i+j*jstride+k*kstride;
+        const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+        const TF exn_loc = exner(p_loc);
+        const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
+
+        if constexpr (field == Satadjust_field::qsat)
+            out[ijk] = ssa.qs;
+        else if constexpr (field == Satadjust_field::T)
+            out[ijk] = ssa.t;
+        else if constexpr (field == Satadjust_field::RH)
+            out[ijk] = fmin(qt[ijk]/ssa.qs, TF(1));
     }
 
     template<typename TF> __global__
@@ -338,6 +374,7 @@ namespace
             TF* __restrict__ qt,
             TF* __restrict__ exn,
             TF* __restrict__ p,
+            const bool pressure_is_3d,
             int istart, int jstart, int kstart,
             int iend,   int jend,   int kend,
             int jj, int kk)
@@ -350,7 +387,9 @@ namespace
         {
             const int ijk = i + j*jj + k*kk;
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exn[k]);
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exn[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
             qlqi[ijk] = ssa.ql + ssa.qi;
         }
     }
@@ -358,6 +397,7 @@ namespace
     template<typename TF> __global__
     void calc_liquid_water_h_g(TF* __restrict__ qlh, TF* __restrict__ th, TF* __restrict__ qt,
                              TF* __restrict__ exnh, TF* __restrict__ ph,
+                             const bool pressure_is_3d,
                              int istart, int jstart, int kstart,
                              int iend,   int jend,   int kend,
                              int jj, int kk)
@@ -369,18 +409,18 @@ namespace
         if (i < iend && j < jend && k < kend)
         {
             const int ijk = i + j*jj + k*kk;
-            const int kk  = i + j*jj;
-
             const TF thh = static_cast<TF>(0.5) * (th[ijk-kk] + th[ijk]); // Half level liq. water pot. temp.
             const TF qth = static_cast<TF>(0.5) * (qt[ijk-kk] + qt[ijk]); // Half level specific hum.
-
-            qlh[ijk] = sat_adjust_g(thh, qth, ph[k], exnh[k]).ql; // Half level liquid water content
+            const TF p_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exnh[k];
+            qlh[ijk] = sat_adjust_g(thh, qth, p_loc, exn_loc).ql; // Half level liquid water content
         }
     }
 
     template<typename TF> __global__
     void calc_ice_g(TF* __restrict__ qi, TF* __restrict__ th, TF* __restrict__ qt,
                              TF* __restrict__ exn, TF* __restrict__ p,
+                             const bool pressure_is_3d,
                              int istart, int jstart, int kstart,
                              int iend,   int jend,   int kend,
                              int jj, int kk)
@@ -392,13 +432,16 @@ namespace
         if (i < iend && j < jend && k < kend)
         {
             const int ijk = i + j*jj + k*kk;
-            qi[ijk] = sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]).qi;
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exn[k];
+            qi[ijk] = sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc).qi;
         }
     }
 
     template<typename TF> __global__
     void calc_condensate_g(TF* __restrict__ qc, TF* __restrict__ th, TF* __restrict__ qt,
                            TF* __restrict__ exn, TF* __restrict__ p,
+                           const bool pressure_is_3d,
                            int istart, int jstart, int kstart,
                            int iend,   int jend,   int kend,
                            int jj, int kk)
@@ -410,7 +453,9 @@ namespace
         if (i < iend && j < jend && k < kend)
         {
             const int ijk = i + j*jj + k*kk;
-            qc[ijk] = fmax(qt[ijk] - sat_adjust_g(th[ijk], qt[ijk], p[k], exn[k]).qs, TF(0.));
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exn[k];
+            qc[ijk] = fmax(qt[ijk] - sat_adjust_g(th[ijk], qt[ijk], p_loc, exn_loc).qs, TF(0.));
         }
     }
 
@@ -421,6 +466,7 @@ namespace
             const TF* const __restrict__ qt,
             const TF* const __restrict__ p,
             const TF* const __restrict__ exn,
+            const bool pressure_is_3d,
             int istart, int jstart, int kstart,
             int iend,   int jend,   int kend,
             int icells, int ijcells)
@@ -433,8 +479,10 @@ namespace
         {
             const int ijk = i + j*icells + k*ijcells;
 
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exn[k]);
-            thv[ijk] = virtual_temperature(exn[k], thl[ijk], qt[ijk], ssa.ql, ssa.qi);
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF exn_loc = pressure_is_3d ? exner(p_loc) : exn[k];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
+            thv[ijk] = virtual_temperature(exn_loc, thl[ijk], qt[ijk], ssa.ql, ssa.qi);
         }
     }
 
@@ -453,6 +501,7 @@ namespace
         const TF* const __restrict__ exnerh,
         const TF* const __restrict__ p,
         const TF* const __restrict__ ph,
+        const bool pressure_is_3d,
         const int istart, const int iend,
         const int jstart, const int jend,
         const int kstart,
@@ -467,9 +516,14 @@ namespace
             const int ij = i + j*icells;
             const int ijk = ij + k*ijcells;
 
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF exn_loc = pressure_is_3d ? Thermo_moist_functions::exner(p_loc) : exner[k];
+            const TF exnh_loc = pressure_is_3d ? Thermo_moist_functions::exner(ph_loc) : exnerh[k];
+
             // Saturation adjustment for first model level
-            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exner[k]);
-            T_bot[ij] = exnerh[k] * thl_bot[ij];
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, exn_loc);
+            T_bot[ij] = exnh_loc * thl_bot[ij];
             T_a[ij] = ssa.t;
 
             // Vapor pressure deficit first model level
@@ -478,8 +532,8 @@ namespace
             vpd[ij] = es-e;
 
             // qsat(T_bot) + dqsatdT(T_bot)
-            qsat_bot[ij] = qsat(ph[k], T_bot[ij]);
-            dqsatdT_bot[ij] = dqsatdT(ph[k], T_bot[ij]);
+            qsat_bot[ij] = qsat(ph_loc, T_bot[ij]);
+            dqsatdT_bot[ij] = dqsatdT(ph_loc, T_bot[ij]);
         }
     }
 
@@ -490,6 +544,7 @@ namespace
             TF* restrict clwp, TF* restrict ciwp, TF* restrict T_sfc,
             const TF* restrict thl, const TF* restrict qt, const TF* restrict thl_bot,
             const TF* restrict p, const TF* restrict ph,
+            const bool pressure_is_3d,
             const int istart, const int iend,
             const int jstart, const int jend,
             const int kstart, const int kend,
@@ -506,12 +561,14 @@ namespace
 
         if (i < iend && j < jend && k < kend)
         {
-            const TF ex = exner(p[k]);
-            const TF dpg = (ph[k] - ph[k+1]) / Constants::grav<TF>;
-
             const int ijk = i + j*jj + k*kk;
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF ph_top = pressure_is_3d ? ph[ijk+kk] : ph[k+1];
+            const TF ex = exner(p_loc);
+            const TF dpg = (ph_loc-ph_top)/Constants::grav<TF>;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], ex);
+            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, ex);
 
             clwp[ijk_nogc] = ssa.ql * dpg;
             ciwp[ijk_nogc] = ssa.qi * dpg;
@@ -525,21 +582,24 @@ namespace
         // Exclude surface, is calculated below without saturation adjustment.
         if (i < iend && j < jend && k > kstart && k < kend+1)
         {
-            const TF exnh = exner(ph[k]);
             const int ijk = i + j*jj + k*kk;
+            const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF exnh = exner(ph_loc);
 
             const TF thlh = interp2(thl[ijk-kk], thl[ijk]);
             const TF qth  = interp2(qt [ijk-kk], qt [ijk]);
 
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph[k], exnh).t;
+            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph_loc, exnh).t;
         }
 
         if (i < iend && j < jend && k == kstart)
         {
             // Calculate surface temperature (assuming no liquid water)
-            const TF exn_bot = exner(ph[kstart]);
             const int ij = i + j*jj;
+            const int ijk = ij+kstart*kk;
+            const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[kstart];
+            const TF exn_bot = exner(ph_loc);
             const int ij_nogc = (i-igc) + (j-jgc)*jj_nogc;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (kstart-kgc)*kk_nogc;
 
@@ -554,6 +614,7 @@ namespace
             TF* restrict clwp, TF* restrict ciwp, TF* restrict T_sfc,
             const TF* restrict thl, const TF* restrict qt, const TF* restrict thl_bot,
             const TF* restrict p, const TF* restrict ph,
+            const bool pressure_is_3d,
             const int istart, const int iend,
             const int jstart, const int jend,
             const int kstart, const int kend,
@@ -570,12 +631,14 @@ namespace
 
         if (i < iend && j < jend && k < kend)
         {
-            const TF ex = exner(p[k]);
-            const TF dpg = (ph[k] - ph[k+1]) / Constants::grav<TF>;
-
             const int ijk = i + j*jj + k*kk;
+            const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+            const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF ph_top = pressure_is_3d ? ph[ijk+kk] : ph[k+1];
+            const TF ex = exner(p_loc);
+            const TF dpg = (ph_loc-ph_top)/Constants::grav<TF>;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], ex);
+            const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p_loc, ex);
 
             clwp[ijk_nogc] = ssa.ql * dpg;
             ciwp[ijk_nogc] = ssa.qi * dpg;
@@ -590,21 +653,24 @@ namespace
         // Exclude surface, is calculated below without saturation adjustment.
         if (i < iend && j < jend && k > kstart && k < kend+1)
         {
-            const TF exnh = exner(ph[k]);
             const int ijk = i + j*jj + k*kk;
+            const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[k];
+            const TF exnh = exner(ph_loc);
 
             const TF thlh = interp2(thl[ijk-kk], thl[ijk]);
             const TF qth  = interp2(qt [ijk-kk], qt [ijk]);
 
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (k-kgc)*kk_nogc;
-            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph[k], exnh).t;
+            T_h[ijk_nogc] = sat_adjust_g(thlh, qth, ph_loc, exnh).t;
         }
 
         if (i < iend && j < jend && k == kstart)
         {
             // Calculate surface temperature (assuming no liquid water)
-            const TF exn_bot = exner(ph[kstart]);
             const int ij = i + j*jj;
+            const int ijk = ij+kstart*kk;
+            const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[kstart];
+            const TF exn_bot = exner(ph_loc);
             const int ij_nogc = (i-igc) + (j-jgc)*jj_nogc;
             const int ijk_nogc = (i-igc) + (j-jgc)*jj_nogc + (kstart-kgc)*kk_nogc;
 
@@ -619,6 +685,7 @@ namespace
             TF* const restrict clwp, TF* const restrict ciwp, TF* const restrict T_sfc,
             const TF* const restrict thl, const TF* const restrict qt, const TF* const restrict thl_bot,
             const TF* const restrict p, const TF* const restrict ph,
+            const bool pressure_is_3d,
             const int* const col_i, const int* const col_j,
             const int n_cols,
             const int kgc, const int kstart, const int kend,
@@ -644,9 +711,13 @@ namespace
 
             if (k < kend)
             {
-                const Struct_sat_adjust<TF> ssa = sat_adjust_g(thl[ijk], qt[ijk], p[k], exner(p[k]));
+                const TF p_loc = pressure_is_3d ? p[ijk] : p[k];
+                const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[k];
+                const TF ph_top = pressure_is_3d ? ph[ijk+ijcells] : ph[k+1];
+                const Struct_sat_adjust<TF> ssa = sat_adjust_g(
+                        thl[ijk], qt[ijk], p_loc, exner(p_loc));
 
-                const TF dpg = (ph[k] - ph[k+1]) / Constants::grav<TF>;
+                const TF dpg = (ph_loc-ph_top)/Constants::grav<TF>;
                 clwp[ijk_out] = ssa.ql * dpg;
                 ciwp[ijk_out] = ssa.qi * dpg;
 
@@ -661,12 +732,14 @@ namespace
                 const TF thlh = interp2(thl[ijk-ijcells], thl[ijk]);
                 const TF qth  = interp2(qt [ijk-ijcells], qt [ijk]);
 
-                T_h[ijk_out] = sat_adjust_g(thlh, qth, ph[k], exner(ph[k])).t;
+                const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[k];
+                T_h[ijk_out] = sat_adjust_g(thlh, qth, ph_loc, exner(ph_loc)).t;
             }
 
             if (k == kstart)
             {
-                T_sfc[ij_out] = thl_bot[ij] * exner(ph[kstart]);
+                const TF ph_loc = pressure_is_3d ? ph[ijk] : ph[kstart];
+                T_sfc[ij_out] = thl_bot[ij] * exner(ph_loc);
                 T_h[ijk_out] = T_sfc[ij_out];
             }
         }
@@ -810,7 +883,82 @@ namespace
         pref[kend]     = static_cast<TF>(2.)*prefh[kend]   - pref[kend-1];
     }
     */
+
+    template<typename TF>
+    __global__ void calc_phydro_3d_column_g(
+            TF* const phydro,
+            TF* const phydroh,
+            const TF* const phydro_tod,
+            const TF* const thl,
+            const TF* const qt,
+            const TF* const dz,
+            const TF* const dzh,
+            const int istart,
+            const int iend,
+            const int jstart,
+            const int jend,
+            const int kstart,
+            const int kend,
+            const int jstride,
+            const int kstride)
+    {
+        const int i = blockIdx.x*blockDim.x+threadIdx.x+istart;
+        const int j = blockIdx.y*blockDim.y+threadIdx.y+jstart;
+        if (i >= iend || j >= jend)
+            return;
+
+        const int ij = i+j*jstride;
+        int ijk = ij+kend*kstride;
+        phydroh[ijk] = phydro_tod[ij];
+
+        TF thlh = TF(.5)*(thl[ijk-kstride]+thl[ijk]);
+        TF qth = TF(.5)*(qt[ijk-kstride]+qt[ijk]);
+        TF exh = exner(phydroh[ijk]);
+        Struct_sat_adjust<TF> ssa = sat_adjust_g(thlh, qth, phydroh[ijk], exh);
+        TF thvh = virtual_temperature(exh, thlh, qth, ssa.ql, ssa.qi);
+        phydro[ijk-kstride] = phydroh[ijk]*exp(
+                grav<TF>*TF(.5)*dzh[kend]/(Rd<TF>*exh*thvh));
+
+        for (int k=kend-1; k>=kstart; --k)
+        {
+            ijk = ij+k*kstride;
+            const TF ex = exner(phydro[ijk]);
+            ssa = sat_adjust_g(thl[ijk], qt[ijk], phydro[ijk], ex);
+            const TF thv = virtual_temperature(ex, thl[ijk], qt[ijk], ssa.ql, ssa.qi);
+            phydroh[ijk] = phydroh[ijk+kstride]*exp(
+                    grav<TF>*dz[k]/(Rd<TF>*ex*thv));
+
+            exh = exner(phydroh[ijk]);
+            thlh = TF(.5)*(thl[ijk-kstride]+thl[ijk]);
+            qth = TF(.5)*(qt[ijk-kstride]+qt[ijk]);
+            ssa = sat_adjust_g(thlh, qth, phydroh[ijk], exh);
+            thvh = virtual_temperature(exh, thlh, qth, ssa.ql, ssa.qi);
+            phydro[ijk-kstride] = phydro[ijk]*exp(
+                    grav<TF>*dzh[k]/(Rd<TF>*exh*thvh));
+        }
+    }
 } // end name    space
+
+template<typename TF>
+void Thermo_moist<TF>::calc_phydro_3d_g()
+{
+    if (!swphydro_3d)
+        return;
+
+    const auto& gd = grid.get_grid_data();
+    const dim3 block(gd.ithread_block, gd.jthread_block);
+    const dim3 blocks((gd.imax+block.x-1)/block.x, (gd.jmax+block.y-1)/block.y);
+    calc_phydro_3d_column_g<TF><<<blocks, block>>>(
+            fields.sd.at("phydro_3d")->fld_g,
+            fields.sd.at("phydroh_3d")->fld_g,
+            phydro_tod_g,
+            fields.sp.at("thl")->fld_g,
+            fields.sp.at("qt")->fld_g,
+            gd.dz_g, gd.dzh_g,
+            gd.istart, gd.iend, gd.jstart, gd.jend,
+            gd.kstart, gd.kend, gd.icells, gd.ijcells);
+    cuda_check_error();
+}
 
 template<typename TF>
 void Thermo_moist<TF>::prepare_device()
@@ -841,6 +989,13 @@ void Thermo_moist<TF>::prepare_device()
     cuda_safe_call(cudaMemcpy(bs.exnrefh_g, bs.exnrefh.data(), nmemsize, cudaMemcpyHostToDevice));
     cuda_safe_call(cudaMemcpy(bs.rhoref_g,  bs.rhoref.data(),  nmemsize, cudaMemcpyHostToDevice));
     cuda_safe_call(cudaMemcpy(bs.rhorefh_g, bs.rhorefh.data(), nmemsize, cudaMemcpyHostToDevice));
+
+    if (swphydro_3d)
+    {
+        phydro_tod_g.allocate(gd.ijcells);
+        cuda_copy(phydro_tod.data(), phydro_tod_g.data(), phydro_tod.size());
+        calc_phydro_3d_g();
+    }
 }
 
 template<typename TF>
@@ -856,6 +1011,7 @@ void Thermo_moist<TF>::clear_device()
     cuda_safe_call(cudaFree(bs.exnrefh_g));
     cuda_safe_call(cudaFree(bs.rhoref_g ));
     cuda_safe_call(cudaFree(bs.rhorefh_g));
+    phydro_tod_g.allocate(0);
     tdep_pbot->clear_device();
 }
 
@@ -875,6 +1031,9 @@ void Thermo_moist<TF>::forward_device()
     cuda_safe_call(cudaMemcpy(bs.exnrefh_g, bs.exnrefh.data(), nmemsize, cudaMemcpyHostToDevice));
     cuda_safe_call(cudaMemcpy(bs.rhoref_g,  bs.rhoref.data(),  nmemsize, cudaMemcpyHostToDevice));
     cuda_safe_call(cudaMemcpy(bs.rhorefh_g, bs.rhorefh.data(), nmemsize, cudaMemcpyHostToDevice));
+
+    if (swphydro_3d && phydro_tod_g.size())
+        cuda_copy(phydro_tod.data(), phydro_tod_g.data(), phydro_tod.size());
 }
 
 template<typename TF>
@@ -893,6 +1052,16 @@ void Thermo_moist<TF>::backward_device()
     cuda_safe_call(cudaMemcpy(bs.exnrefh.data(), bs.exnrefh_g, nmemsize, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(bs.rhoref.data(),  bs.rhoref_g,  nmemsize, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(bs.rhorefh.data(), bs.rhorefh_g, nmemsize, cudaMemcpyDeviceToHost));
+
+    if (swphydro_3d)
+    {
+        fields.backward_field_device_3d(
+                fields.sd.at("phydro_3d")->fld.data(),
+                fields.sd.at("phydro_3d")->fld_g);
+        fields.backward_field_device_3d(
+                fields.sd.at("phydroh_3d")->fld.data(),
+                fields.sd.at("phydroh_3d")->fld_g);
+    }
 
     bs_stats = bs;
 }
@@ -942,16 +1111,40 @@ void Thermo_moist<TF>::exec(const double dt, Stats<TF>& stats)
         forward_device();
     }
 
-    calc_buoyancy_tend_2nd_g<TF><<<gridGPU, blockGPU>>>(
-            fields.mt.at("w")->fld_g,
-            fields.sp.at("thl")->fld_g,
-            fields.sp.at("qt")->fld_g,
-            bs.thvrefh_g,
-            bs.exnrefh_g,
-            bs.prefh_g,
-            gd.istart, gd.jstart, gd.kstart+1,
-            gd.iend,   gd.jend,   gd.kend,
-            gd.icells, gd.ijcells);
+    if (swphydro_3d)
+        calc_phydro_3d_g();
+
+    if (swphydro_3d && swtimedep_phydro_3d)
+    {
+        field3d_operators.calc_mean_profile_g(
+                bs.pref_g, fields.sd.at("phydro_3d")->fld_g);
+        field3d_operators.calc_mean_profile_g(
+                bs.prefh_g, fields.sd.at("phydroh_3d")->fld_g);
+
+        cuda_safe_call(cudaMemcpy(
+                bs.pref.data(), bs.pref_g, gd.kcells*sizeof(TF), cudaMemcpyDeviceToHost));
+        cuda_safe_call(cudaMemcpy(
+                bs.prefh.data(), bs.prefh_g, gd.kcells*sizeof(TF), cudaMemcpyDeviceToHost));
+        bs.pbot = bs.prefh[gd.kstart];
+    }
+
+    auto launch_buoyancy = [&]<bool pressure_is_3d>()
+    {
+        calc_buoyancy_tend_2nd_g<TF, pressure_is_3d><<<gridGPU, blockGPU>>>(
+                fields.mt.at("w")->fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                bs.thvrefh_g,
+                pressure_is_3d ? nullptr : bs.exnrefh_g,
+                pressure_is_3d ? fields.sd.at("phydroh_3d")->fld_g : bs.prefh_g,
+                gd.istart, gd.jstart, gd.kstart+1,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+    };
+    if (swphydro_3d)
+        launch_buoyancy.template operator()<true>();
+    else
+        launch_buoyancy.template operator()<false>();
     cuda_check_error();
 
     cudaDeviceSynchronize();
@@ -974,6 +1167,8 @@ void Thermo_moist<TF>::get_thermo_field_g(
 
     dim3 gridGPU2 (gridi, gridj, gd.kmax);
     dim3 blockGPU2(blocki, blockj, 1);
+
+    dim3 gridGPU_h (gridi, gridj, gd.kmax+1);
 
     // BvS: getthermofield() is called from subgrid-model, before thermo(), so re-calculate the hydrostatic pressure
     if (bs.swupdatebasestate && (name != "N2"))
@@ -1010,7 +1205,9 @@ void Thermo_moist<TF>::get_thermo_field_g(
     {
         calc_buoyancy_g<TF><<<gridGPU, blockGPU>>>(
             fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.thvref_g, bs.pref_g, bs.exnref_g,
+            bs.thvref_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d ? nullptr : bs.exnref_g, swphydro_3d,
             gd.istart,  gd.jstart, gd.kstart,
             gd.iend, gd.jend, gd.kcells,
             gd.icells, gd.ijcells);
@@ -1018,19 +1215,32 @@ void Thermo_moist<TF>::get_thermo_field_g(
     }
     else if (name == "b_h")
     {
-        calc_buoyancy_g<TF><<<gridGPU, blockGPU>>>(
-            fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.thvrefh_g, bs.prefh_g, bs.exnrefh_g,
-            gd.istart,  gd.jstart, gd.kstart,
-            gd.iend, gd.jend, gd.kcells,
-            gd.icells, gd.ijcells);
+        auto launch_buoyancy_h = [&]<bool pressure_is_3d>()
+        {
+            calc_buoyancy_h_g<TF, pressure_is_3d><<<gridGPU_h, blockGPU>>>(
+                    fld.fld_g,
+                    fields.sp.at("thl")->fld_g,
+                    fields.sp.at("qt")->fld_g,
+                    bs.thvrefh_g,
+                    pressure_is_3d ? fields.sd.at("phydroh_3d")->fld_g.data() : bs.prefh_g,
+                    pressure_is_3d ? nullptr : bs.exnrefh_g,
+                    gd.istart, gd.jstart, gd.kstart,
+                    gd.iend, gd.jend, gd.kend,
+                    gd.icells, gd.ijcells);
+        };
+        if (swphydro_3d)
+            launch_buoyancy_h.template operator()<true>();
+        else
+            launch_buoyancy_h.template operator()<false>();
         cuda_check_error();
     }
     else if (name == "ql")
     {
         calc_liquid_water_g<TF><<<gridGPU2, blockGPU2>>>(
             fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
+            swphydro_3d ? nullptr : bs.exnref_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d,
             gd.istart,  gd.jstart,  gd.kstart,
             gd.iend,    gd.jend,    gd.kend,
             gd.icells, gd.ijcells);
@@ -1040,7 +1250,9 @@ void Thermo_moist<TF>::get_thermo_field_g(
     {
         calc_liquid_water_h_g<TF><<<gridGPU2, blockGPU2>>>(
             fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnrefh_g, bs.prefh_g,
+            swphydro_3d ? nullptr : bs.exnrefh_g,
+            swphydro_3d ? fields.sd.at("phydroh_3d")->fld_g.data() : bs.prefh_g,
+            swphydro_3d,
             gd.istart,  gd.jstart,  gd.kstart,
             gd.iend,    gd.jend,    gd.kend,
             gd.icells, gd.ijcells);
@@ -1050,10 +1262,42 @@ void Thermo_moist<TF>::get_thermo_field_g(
     {
         calc_ice_g<TF><<<gridGPU2, blockGPU2>>>(
             fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
+            swphydro_3d ? nullptr : bs.exnref_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d,
             gd.istart,  gd.jstart,  gd.kstart,
             gd.iend,    gd.jend,    gd.kend,
             gd.icells, gd.ijcells);
+        cuda_check_error();
+    }
+    else if (name == "qsat")
+    {
+        calc_satadjust_field_g<TF, Satadjust_field::qsat><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+                swphydro_3d,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+    }
+    else if (name == "rh")
+    {
+        calc_satadjust_field_g<TF, Satadjust_field::RH><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+                swphydro_3d,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+    }
+    else if (name == "T")
+    {
+        calc_satadjust_field_g<TF, Satadjust_field::T><<<gridGPU2, blockGPU2>>>(
+                fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
+                swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+                swphydro_3d,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
         cuda_check_error();
     }
     else if (name == "qlqi")
@@ -1062,7 +1306,9 @@ void Thermo_moist<TF>::get_thermo_field_g(
             fld.fld_g,
             fields.sp.at("thl")->fld_g,
             fields.sp.at("qt")->fld_g,
-            bs.exnref_g, bs.pref_g,
+            swphydro_3d ? nullptr : bs.exnref_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d,
             gd.istart,  gd.jstart,  gd.kstart,
             gd.iend,    gd.jend,    gd.kend,
             gd.icells, gd.ijcells);
@@ -1072,7 +1318,9 @@ void Thermo_moist<TF>::get_thermo_field_g(
     {
         calc_condensate_g<TF><<<gridGPU2, blockGPU2>>>(
             fld.fld_g, fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
-            bs.exnrefh_g, bs.prefh_g,
+            swphydro_3d ? nullptr : bs.exnrefh_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.prefh_g,
+            swphydro_3d,
             gd.istart,  gd.jstart,  gd.kstart,
             gd.iend,    gd.jend,    gd.kend,
             gd.icells, gd.ijcells);
@@ -1094,8 +1342,9 @@ void Thermo_moist<TF>::get_thermo_field_g(
             fld.fld_g,
             fields.sp.at("thl")->fld_g,
             fields.sp.at("qt")->fld_g,
-            bs.pref_g,
-            bs.exnref_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d ? nullptr : bs.exnref_g,
+            swphydro_3d,
             gd.istart, gd.jstart, gd.kstart,
             gd.iend,   gd.jend,   gd.kend,
             gd.icells, gd.ijcells);
@@ -1119,6 +1368,10 @@ TF* Thermo_moist<TF>::get_basestate_fld_g(std::string name)
         return bs.pref_g;
     else if (name == "prefh")
         return bs.prefh_g;
+    else if (name == "p")
+        return swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g;
+    else if (name == "ph")
+        return swphydro_3d ? fields.sd.at("phydroh_3d")->fld_g.data() : bs.prefh_g;
     else if (name == "exner")
         return bs.exnref_g;
     else if (name == "exnerh")
@@ -1223,6 +1476,9 @@ void Thermo_moist<TF>::exec_column(Column<TF>& column)
     dim3 gridGPU (gridi, gridj);
     dim3 blockGPU(blocki, blockj);
 
+    get_thermo_field_g(*output, "T", false);
+    column.calc_column("T", output->fld_g, no_offset);
+
     get_thermo_field_g(*output, "thv", false);
     column.calc_column("thv", output->fld_g, no_offset);
 
@@ -1262,6 +1518,17 @@ void Thermo_moist<TF>::exec_column(Column<TF>& column)
     column.calc_time_series("thl_bot", fields.ap.at("thl")->fld_bot_g, no_offset);
     column.calc_time_series("qt_bot",  fields.ap.at("qt")->fld_bot_g,  no_offset);
 
+    if (swphydro_3d)
+    {
+        column.calc_column("phydro", fields.sd.at("phydro_3d")->fld_g, no_offset);
+        column.calc_column("phydroh", fields.sd.at("phydroh_3d")->fld_g, no_offset);
+    }
+    else
+    {
+        column.set_all_columns("phydro", bs.pref.data(), no_offset);
+        column.set_all_columns("phydroh", bs.prefh.data(), no_offset);
+    }
+
     fields.release_tmp_g(output);
 }
 #endif
@@ -1286,7 +1553,9 @@ void Thermo_moist<TF>::get_radiation_fields_g(
             clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
             fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
             fields.sp.at("thl")->fld_bot_g,
-            bs.pref_g, bs.prefh_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d ? fields.sd.at("phydroh_3d")->fld_g.data() : bs.prefh_g,
+            swphydro_3d,
             gd.istart, gd.iend,
             gd.jstart, gd.jend,
             gd.kstart, gd.kend,
@@ -1317,7 +1586,9 @@ void Thermo_moist<TF>::get_radiation_fields_g(
             clwp.fld_g, ciwp.fld_g, T_h.fld_bot_g,
             fields.sp.at("thl")->fld_g, fields.sp.at("qt")->fld_g,
             fields.sp.at("thl")->fld_bot_g,
-            bs.pref_g, bs.prefh_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d ? fields.sd.at("phydroh_3d")->fld_g.data() : bs.prefh_g,
+            swphydro_3d,
             gd.istart, gd.iend,
             gd.jstart, gd.jend,
             gd.kstart, gd.kend,
@@ -1362,8 +1633,9 @@ void Thermo_moist<TF>::get_radiation_columns_g(
             fields.sp.at("thl")->fld_g,
             fields.sp.at("qt")->fld_g,
             fields.sp.at("thl")->fld_bot_g,
-            bs.pref_g,
-            bs.prefh_g,
+            swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+            swphydro_3d ? fields.sd.at("phydroh_3d")->fld_g.data() : bs.prefh_g,
+            swphydro_3d,
             col_i_g,
             col_j_g,
             n_cols,
@@ -1396,7 +1668,9 @@ void Thermo_moist<TF>::get_land_surface_fields_g(
         fields.sp.at("thl")->fld_g,
         fields.sp.at("qt")->fld_g,
         bs.exnref_g, bs.exnrefh_g,
-        bs.pref_g, bs.prefh_g,
+        swphydro_3d ? fields.sd.at("phydro_3d")->fld_g.data() : bs.pref_g,
+        swphydro_3d ? fields.sd.at("phydroh_3d")->fld_g.data() : bs.prefh_g,
+        swphydro_3d,
         gd.istart, gd.iend,
         gd.jstart, gd.jend,
         gd.kstart,

@@ -92,19 +92,19 @@ void Advec_2i5<TF>::exec(Stats<TF>& stats)
             grid_layout,
             fields.mt.at("u")->fld_g.view(),
             fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g, fields.mp.at("w")->fld_g,
-            fields.rhorefi_g, fields.rhorefh_g, gd.dzi_g, gd.dxi, gd.dyi);
+            fields.rhorefi_g, fields.rhorefh_g, gd.dzi_g, gd.dxi, gd.dyi, TF(1), TF(1));
 
     launch_grid_kernel<Advec_2i5_kernels::advec_v_g<TF>>(
             grid_layout,
             fields.mt.at("v")->fld_g.view(),
             fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g, fields.mp.at("w")->fld_g,
-            fields.rhorefi_g, fields.rhorefh_g, gd.dzi_g, gd.dxi, gd.dyi);
+            fields.rhorefi_g, fields.rhorefh_g, gd.dzi_g, gd.dxi, gd.dyi, TF(1), TF(1));
 
     launch_grid_kernel<Advec_2i5_kernels::advec_w_g<TF>>(
             grid_layout,
             fields.mt.at("w")->fld_g.view(),
             fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g, fields.mp.at("w")->fld_g,
-            fields.rhoref_g, fields.rhorefhi_g, gd.dzhi_g, gd.dxi, gd.dyi);
+            fields.rhoref_g, fields.rhorefhi_g, gd.dzhi_g, gd.dxi, gd.dyi, TF(1));
 
     for (const std::string& s : sp_limit)
     {
@@ -121,7 +121,7 @@ void Advec_2i5<TF>::exec(Stats<TF>& stats)
                 grid_layout,
                 fields.st.at(s)->fld_g.view(), fields.sp.at(s)->fld_g,
                 fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g, fields.mp.at("w")->fld_g,
-                fields.rhorefi_g, fields.rhorefh_g, gd.dzi_g, gd.dxi, gd.dyi);
+                fields.rhorefi_g, fields.rhorefh_g, gd.dzi_g, gd.dxi, gd.dyi, TF(1), TF(1));
     }
 
     cudaDeviceSynchronize();

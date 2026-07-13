@@ -130,6 +130,51 @@ namespace Land_surface_kernels_g
     }
 
     template<typename TF> __global__
+    void diagnose_1_5m_10m_MO_g(
+            TF* const t1_5m,
+            TF* const q1_5m,
+            TF* const u10m,
+            TF* const v10m,
+            TF* const U10m,
+            const TF* const thl_bot,
+            const TF* const qt_bot,
+            const TF* const thl_fluxbot,
+            const TF* const qt_fluxbot,
+            const TF* const u_fluxbot,
+            const TF* const v_fluxbot,
+            const TF* const ustar,
+            const TF* const obuk,
+            const TF* const z0m,
+            const TF* const z0h,
+            const TF* const phydroh,
+            const bool pressure_is_3d,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart,
+            const int jstride, const int kstride)
+    {
+        const int i = blockIdx.x*blockDim.x+threadIdx.x+istart;
+        const int j = blockIdx.y*blockDim.y+threadIdx.y+jstart;
+        if (i >= iend || j >= jend)
+            return;
+
+        constexpr TF z_1_5m = TF(1.5);
+        constexpr TF z_10m = TF(10);
+        const int ij = i+j*jstride;
+        const int ijk = ij+kstart*kstride;
+        const TF pressure = pressure_is_3d ? phydroh[ijk] : phydroh[kstart];
+        const TF exn_bot = Thermo_moist_functions::exner(pressure);
+        const TF fac1 = TF(1)/(ustar[ij]*most::fh(z_1_5m, z0h[ij], obuk[ij]));
+        const TF fac2 = TF(1)/(ustar[ij]*most::fm(z_10m, z0m[ij], obuk[ij]));
+
+        t1_5m[ij] = thl_bot[ij]*exn_bot-thl_fluxbot[ij]*fac1;
+        q1_5m[ij] = qt_bot[ij]-qt_fluxbot[ij]*fac1;
+        u10m[ij] = -u_fluxbot[ij]*fac2;
+        v10m[ij] = -v_fluxbot[ij]*fac2;
+        U10m[ij] = sqrt(u10m[ij]*u10m[ij]+v10m[ij]*v10m[ij]);
+    }
+
+    template<typename TF> __global__
     void calc_resistance_functions_g(
             TF* const __restrict__ f1,
             TF* const __restrict__ f2,
@@ -293,6 +338,8 @@ namespace Land_surface_kernels_g
             const TF* const __restrict__ b_bot,
             const TF* const __restrict__ rhorefh,
             const TF* const __restrict__ exnerh,
+            const TF* const __restrict__ ph,
+            const bool pressure_is_3d,
             const TF db_ref,
             const TF emis_sfc,
             const TF dt,
@@ -305,7 +352,6 @@ namespace Land_surface_kernels_g
         const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
         const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
 
-        const TF exner_bot = exnerh[kstart];
         const TF rho_bot = rhorefh[kstart];
 
         if (i < iend && j < jend)
@@ -313,6 +359,9 @@ namespace Land_surface_kernels_g
             const int ij    = i + j*icells;
             const int ijk   = ij + kstart*ijcells;
             const int ijk_s = ij + (kend_soil-1)*ijcells;
+
+            const TF exner_bot = pressure_is_3d
+                    ? Thermo_moist_functions::exner(ph[ijk]) : exnerh[kstart];
 
             const TF T_bot = thl_bot[ij] * exner_bot;
 
@@ -591,6 +640,7 @@ template<typename TF> __global__
             const TF* const __restrict__ rhoh,
             const TF* const __restrict__ prefh,
             const TF* const __restrict__ exnerh,
+            const bool pressure_is_3d,
             const int istart, const int iend,
             const int jstart, const int jend,
             const int kstart,
@@ -609,8 +659,11 @@ template<typename TF> __global__
 
             if (water_mask[ij])
             {
-                thl_bot_wet[ij] = t_bot_water[ij] / exnerh[kstart];
-                qt_bot_wet[ij]  = Thermo_moist_functions::qsat(prefh[kstart], t_bot_water[ij]);
+                const TF p_loc = pressure_is_3d ? prefh[ijk] : prefh[kstart];
+                const TF exn_loc = pressure_is_3d
+                        ? Thermo_moist_functions::exner(p_loc) : exnerh[kstart];
+                thl_bot_wet[ij] = t_bot_water[ij] / exn_loc;
+                qt_bot_wet[ij]  = Thermo_moist_functions::qsat(p_loc, t_bot_water[ij]);
 
                 c_veg[ij]  = TF(0);
                 c_soil[ij] = TF(0);

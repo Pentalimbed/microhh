@@ -1978,6 +1978,11 @@ void Thermo_moist<TF>::update_time_dependent(Timeloop<TF>& timeloop)
                 phydro_tod_prev.data(),
                 phydro_tod_next.data(),
                 f0, f1, gd.ijcells);
+
+        #ifdef USECUDA
+        if (phydro_tod_g.size())
+            cuda_copy(phydro_tod.data(), phydro_tod_g.data(), phydro_tod.size());
+        #endif
     }
 }
 

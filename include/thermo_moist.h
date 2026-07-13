@@ -155,6 +155,11 @@ class Thermo_moist : public Thermo<TF>
         std::vector<TF> phydro_tod_next;
         void create_phydro_3d(Timeloop<TF>&);
 
+        #ifdef USECUDA
+        cuda_vector<TF> phydro_tod_g;
+        void calc_phydro_3d_g();
+        #endif
+
         std::vector<std::string> dumplist;         ///< List with all 3d dumps from the ini file.
 
         void create_column(Column<TF>&); ///< Initialization of the single column output.

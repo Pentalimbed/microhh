@@ -46,6 +46,36 @@ namespace
 
     const int nzL = 10000; // Size of the lookup table for MO iterations.
 
+    template<typename TF> __global__
+    void calc_z0_charnock_g(
+            TF* const __restrict__ z0m,
+            TF* const __restrict__ z0h,
+            const TF* const __restrict__ ustar,
+            const TF alpha_m,
+            const TF alpha_ch,
+            const TF alpha_h,
+            const int istart,
+            const int iend,
+            const int jstart,
+            const int jend,
+            const int icells)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            const int ij = i + j*icells;
+            constexpr TF visc = TF(1.5e-5);
+            constexpr TF min_ustar = TF(1e-8);
+            const TF ustar_lim = max(ustar[ij], min_ustar);
+
+            z0m[ij] = alpha_m*visc/ustar_lim
+                    + alpha_ch*fm::pow2(ustar_lim)/Constants::grav<TF>;
+            z0h[ij] = alpha_h*visc/ustar_lim;
+        }
+    }
+
     template<typename TF, bool sw_constant_z0> __global__
     void stability_g(
             TF* const __restrict__ ustar,
@@ -332,6 +362,11 @@ void Boundary_surface<TF>::backward_device(Thermo<TF>& thermo)
     // 2D fields:
     cuda_safe_call(cudaMemcpy(obuk.data(),    obuk_g,    dmemsize2d, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(ustar.data(),   ustar_g,   dmemsize2d, cudaMemcpyDeviceToHost));
+    if (sw_charnock)
+    {
+        cuda_safe_call(cudaMemcpy(z0m.data(), z0m_g, dmemsize2d, cudaMemcpyDeviceToHost));
+        cuda_safe_call(cudaMemcpy(z0h.data(), z0h_g, dmemsize2d, cudaMemcpyDeviceToHost));
+    }
     cuda_safe_call(cudaMemcpy(dudz_mo.data(), dudz_mo_g, dmemsize2d, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(dvdz_mo.data(), dvdz_mo_g, dmemsize2d, cudaMemcpyDeviceToHost));
 
@@ -374,6 +409,17 @@ void Boundary_surface<TF>::exec(
     gridj = gd.jcells/blockj + (gd.jcells%blockj > 0);
     dim3 gridGPU2 (gridi,  gridj,  1);
     dim3 blockGPU2(blocki, blockj, 1);
+
+    if (sw_charnock)
+    {
+        calc_z0_charnock_g<TF><<<gridGPU, blockGPU>>>(
+                z0m_g, z0h_g, ustar_g,
+                alpha_m, alpha_ch, alpha_h,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.icells);
+        boundary_cyclic.exec_2d_g(z0m_g);
+        boundary_cyclic.exec_2d_g(z0h_g);
+        cuda_check_error();
+    }
 
     // Calculate dutot in tmp2
     auto dutot = fields.get_tmp_g();
@@ -525,11 +571,17 @@ void Boundary_surface<TF>::exec(
 }
 
 template<typename TF>
-void Boundary_surface<TF>::exec_column(Column<TF>& column)
+void Boundary_surface<TF>::exec_column(Column<TF>& column, Thermo<TF>&)
 {
     const TF no_offset = 0.;
     column.calc_time_series("obuk", obuk_g, no_offset);
     column.calc_time_series("ustar", ustar_g, no_offset);
+
+    if (sw_charnock)
+    {
+        column.calc_time_series("z0m", z0m_g, no_offset);
+        column.calc_time_series("z0h", z0h_g, no_offset);
+    }
 }
 #endif
 

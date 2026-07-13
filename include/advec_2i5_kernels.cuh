@@ -32,6 +32,9 @@ namespace Advec_2i5_kernels
     using namespace Finite_difference::O4;
     using namespace Finite_difference::O6;
 
+    // The centered 2i6 scheme reuses these stencils with diss_factor=0.
+    #define fabs(value) (diss_factor * ::fabs(value))
+
     template<typename TF>
     struct advec_u_g
     {
@@ -43,7 +46,8 @@ namespace Advec_2i5_kernels
                         TF* __restrict__ ut, const TF* __restrict__ u,
                         const TF* __restrict__ v,  const TF* __restrict__ w,
                         const TF* __restrict__ rhorefi, const TF* __restrict__ rhorefh,
-                        const TF* __restrict__ dzi, const TF dxi, const TF dyi)
+                        const TF* __restrict__ dzi, const TF dxi, const TF dyi,
+                        const TF diss_factor, const TF top_flux_factor)
         {
             const int ii1 = 1*g.istride;
             const int ii2 = 2*g.istride;
@@ -119,8 +123,9 @@ namespace Advec_2i5_kernels
             else if (level.distance_to_end() == 0)
             {
                 ut[ijk] +=
-                        // w*du/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - ( -rhorefh[k] * interp2(w[ijk-ii1    ], w[ijk    ]) * interp2(u[ijk-kk1], u[ijk    ]) ) * rhorefi[k] * dzi[k];
+                        // w*du/dz -> second order interpolation at both top and bottom faces.
+                        - ( top_flux_factor * rhorefh[k+1] * interp2(w[ijk-ii1+kk1], w[ijk+kk1]) * interp2(u[ijk], u[ijk+kk1])
+                            - rhorefh[k] * interp2(w[ijk-ii1], w[ijk]) * interp2(u[ijk-kk1], u[ijk]) ) * rhorefi[k] * dzi[k];
             }
             else
             {
@@ -146,7 +151,8 @@ namespace Advec_2i5_kernels
                    TF* __restrict__ vt, const TF* __restrict__ u,
                    const TF* __restrict__ v,  const TF* __restrict__ w,
                    const TF* __restrict__ rhorefi, const TF* __restrict__ rhorefh,
-                   const TF* __restrict__ dzi, const TF dxi, const TF dyi)
+                   const TF* __restrict__ dzi, const TF dxi, const TF dyi,
+                   const TF diss_factor, const TF top_flux_factor)
         {
             const int ii = g.istride;
             const int jj = g.jstride;
@@ -226,8 +232,9 @@ namespace Advec_2i5_kernels
             else if (level.distance_to_end() == 0)
             {
                 vt[ijk] +=
-                        // w*dv/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - ( -rhorefh[k  ] * interp2(w[ijk-jj1    ], w[ijk    ]) * interp2(v[ijk-kk1], v[ijk    ]) ) * rhorefi[k] * dzi[k];
+                        // w*dv/dz -> second order interpolation at both top and bottom faces.
+                        - ( top_flux_factor * rhorefh[k+1] * interp2(w[ijk-jj1+kk1], w[ijk+kk1]) * interp2(v[ijk], v[ijk+kk1])
+                            - rhorefh[k] * interp2(w[ijk-jj1], w[ijk]) * interp2(v[ijk-kk1], v[ijk]) ) * rhorefi[k] * dzi[k];
             }
             else
             {
@@ -254,7 +261,8 @@ namespace Advec_2i5_kernels
                        TF* __restrict__ wt, const TF* __restrict__ u,
                        const TF* __restrict__ v,  const TF* __restrict__ w,
                        const TF* __restrict__ rhoref, const TF* __restrict__ rhorefhi,
-                       const TF* __restrict__ dzhi, const TF dxi, const TF dyi)
+                       const TF* __restrict__ dzhi, const TF dxi, const TF dyi,
+                       const TF diss_factor)
         {
             const int ii = g.istride;
             const int jj = g.jstride;
@@ -350,7 +358,8 @@ namespace Advec_2i5_kernels
                 TF* __restrict__ st, const TF* __restrict__ s,
                 const TF* __restrict__ u, const TF* __restrict__ v,  const TF* __restrict__ w,
                 const TF* __restrict__ rhorefi, const TF* __restrict__ rhorefh,
-                const TF* __restrict__ dzi, const TF dxi, const TF dyi)
+                const TF* __restrict__ dzi, const TF dxi, const TF dyi,
+                const TF diss_factor, const TF top_flux_factor)
         {
             const int ii = g.istride;
             const int jj = g.jstride;
@@ -428,8 +437,9 @@ namespace Advec_2i5_kernels
             else if (level.distance_to_end() == 0)
             {
                 st[ijk] +=
-                        // w*ds/dz -> second order interpolation for fluxbot, fluxtop=0 as w=0
-                        - (- rhorefh[k  ] * w[ijk    ] * interp2(s[ijk-kk1], s[ijk    ]) ) * rhorefi[k] * dzi[k];
+                        // w*ds/dz -> second order interpolation at both top and bottom faces.
+                        - (top_flux_factor * rhorefh[k+1] * w[ijk+kk1] * interp2(s[ijk], s[ijk+kk1])
+                            - rhorefh[k] * w[ijk] * interp2(s[ijk-kk1], s[ijk]) ) * rhorefi[k] * dzi[k];
             }
             else
             {
@@ -443,6 +453,8 @@ namespace Advec_2i5_kernels
         }
     };
 
+
+    #undef fabs
 
     // Implementation flux limiter according to Koren, 1993.
     template<typename TF> __device__

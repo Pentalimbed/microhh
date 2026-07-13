@@ -48,5 +48,53 @@ namespace Buffer_kernels
             at[ijk] -= sigma_z[k] * (a[ijk]-abuf[k]);
         }
     };
+
+    template<typename TF>
+    struct buffer_3d_g
+    {
+        DEFINE_GRID_KERNEL("buffer::buffer_3d_g", 0)
+
+        template <typename Level>
+        CUDA_DEVICE
+        void operator()(
+                Grid_layout g, const int i, const int j, const int k, const Level,
+                TF* const __restrict__ at,
+                const TF* const __restrict__ a,
+                const TF* const __restrict__ abuf,
+                const TF* const __restrict__ sigma_z,
+                const int kstart_buffer,
+                const int jstride_buffer,
+                const int kstride_buffer)
+        {
+            const int ijk = g(i, j, k);
+            const int ijk_buffer = i + j*jstride_buffer + (k-kstart_buffer)*kstride_buffer;
+            at[ijk] -= sigma_z[k] * (a[ijk]-abuf[ijk_buffer]);
+        }
+    };
+
+    template<typename TF>
+    struct buffer_local_g
+    {
+        DEFINE_GRID_KERNEL("buffer::buffer_local_g", 3)
+
+        template <typename Level>
+        CUDA_DEVICE
+        void operator()(
+                Grid_layout g, const int i, const int j, const int k, const Level,
+                TF* const __restrict__ at,
+                const TF* const __restrict__ a,
+                const TF* const __restrict__ sigma_z)
+        {
+            const int ijk = g(i, j, k);
+            TF local_mean = TF(0);
+
+            for (int jc=-3; jc<=3; ++jc)
+                for (int ic=-3; ic<=3; ++ic)
+                    local_mean += a[ijk + ic*g.istride + jc*g.jstride];
+
+            local_mean /= TF(49);
+            at[ijk] -= sigma_z[k] * (a[ijk]-local_mean);
+        }
+    };
 }
 #endif // BUFFER_KERNELS_CUH

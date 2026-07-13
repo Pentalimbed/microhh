@@ -314,6 +314,8 @@ Boundary_surface_lsm<TF>::Boundary_surface_lsm(
     sw_charnock = inputin.get_item<bool>("land_surface", "swcharnock", "", false);
     if (sw_charnock && sw_constant_z0)
         throw std::runtime_error("\"swcharnock=true\" requires \"swconstantz0=false\"");
+    if (sw_charnock && !sw_water)
+        throw std::runtime_error("\"swcharnock=true\" requires \"swwater=true\"");
 
     if (sw_charnock)
     {

@@ -42,16 +42,25 @@ void Buffer<TF>::prepare_device()
 
     if (swbuffer)
     {
-        const int nmemsize = gd.kcells*sizeof(TF);
-
         // Allocate the buffer arrays at GPU.
-        for (auto& it : fields.ap)
+        if (swbuffer_3d)
         {
-            bufferprofs_g.emplace(it.first, cuda_vector<TF>(gd.kcells));
-            cuda_safe_call(cudaMemcpy(bufferprofs_g.at(it.first), bufferprofs.at(it.first).data(), nmemsize, cudaMemcpyHostToDevice));
+            for (const auto& name : buffer3d_list)
+            {
+                const auto size = bufferprofs.at(name).size();
+                bufferprofs_g.emplace(name, cuda_vector<TF>(size));
+            }
+        }
+        else
+        {
+            for (auto& it : fields.ap)
+                bufferprofs_g.emplace(it.first, cuda_vector<TF>(gd.kcells));
         }
 
+        forward_device();
+
         // Pre-calculate buffer factor.
+        const int nmemsize = gd.kcells*sizeof(TF);
         sigma_z.allocate(gd.kcells);
         sigma_zh.allocate(gd.kcells);
 
@@ -66,6 +75,20 @@ void Buffer<TF>::prepare_device()
         for (int k=bufferkstarth; k<gd.kend; k++)
             tmp->fld_mean[k] = sigma * pow((gd.zh[k]-zstart)*zsizebufi, beta);
         cuda_safe_call(cudaMemcpy(sigma_zh, tmp->fld_mean.data(), nmemsize, cudaMemcpyHostToDevice));
+    }
+}
+
+template<typename TF>
+void Buffer<TF>::forward_device()
+{
+    if (!swbuffer || swupdate_local)
+        return;
+
+    for (auto& item : bufferprofs_g)
+    {
+        const auto& source = bufferprofs.at(item.first);
+        cuda_safe_call(cudaMemcpy(
+                item.second, source.data(), source.size()*sizeof(TF), cudaMemcpyHostToDevice));
     }
 }
 
@@ -98,7 +121,53 @@ void Buffer<TF>::exec(Stats<TF>& stats)
                 gd.jstride,
                 gd.kstride};
 
-        if (swupdate)
+        if (swbuffer_3d)
+        {
+            for (const auto& name : buffer3d_list)
+            {
+                const int kstart = name == "w" ? bufferkstarth : bufferkstart;
+                const Grid_layout& layout = name == "w" ? grid_layout_half : grid_layout_full;
+                const auto& sigma = name == "w" ? sigma_zh : sigma_z;
+
+                launch_grid_kernel<Buffer_kernels::buffer_3d_g<TF>>(
+                        layout,
+                        fields.at.at(name)->fld_g.view(),
+                        fields.ap.at(name)->fld_g,
+                        bufferprofs_g.at(name),
+                        sigma,
+                        kstart,
+                        gd.icells,
+                        gd.ijcells);
+            }
+        }
+        else if (swupdate && swupdate_local)
+        {
+            launch_grid_kernel<Buffer_kernels::buffer_local_g<TF>>(
+                    grid_layout_full,
+                    fields.mt.at("u")->fld_g.view(),
+                    fields.mp.at("u")->fld_g,
+                    sigma_z);
+
+            launch_grid_kernel<Buffer_kernels::buffer_local_g<TF>>(
+                    grid_layout_full,
+                    fields.mt.at("v")->fld_g.view(),
+                    fields.mp.at("v")->fld_g,
+                    sigma_z);
+
+            launch_grid_kernel<Buffer_kernels::buffer_local_g<TF>>(
+                    grid_layout_half,
+                    fields.mt.at("w")->fld_g.view(),
+                    fields.mp.at("w")->fld_g,
+                    sigma_zh);
+
+            for (auto& it : fields.sp)
+                launch_grid_kernel<Buffer_kernels::buffer_local_g<TF>>(
+                        grid_layout_full,
+                        fields.st.at(it.first)->fld_g.view(),
+                        fields.sp.at(it.first)->fld_g,
+                        sigma_z);
+        }
+        else if (swupdate)
         {
             launch_grid_kernel<Buffer_kernels::buffer_g<TF>>(
                     grid_layout_full,

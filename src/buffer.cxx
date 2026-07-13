@@ -540,6 +540,8 @@ void Buffer<TF>::exec(Stats<TF>& stats)
     fields.release_tmp(tmp);
 }
 
+#endif
+
 
 template <typename TF>
 void Buffer<TF>::update_time_dependent(
@@ -627,8 +629,11 @@ void Buffer<TF>::update_time_dependent(
             buffer_data_next.at(fld).data(),
             f0, f1, ncells);
     }
+
+    #ifdef USECUDA
+    forward_device();
+    #endif
 }
-#endif
 
 #ifdef FLOAT_SINGLE
 template class Buffer<float>;

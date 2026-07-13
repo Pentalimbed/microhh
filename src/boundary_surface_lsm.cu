@@ -42,6 +42,39 @@ namespace
     namespace lsmk = Land_surface_kernels_g;
     namespace bsk = Boundary_surface_kernels_g;
     namespace sk = Soil_kernels_g;
+
+    template<typename TF>
+    __global__ void calc_z0_charnock_g(
+            TF* const z0m,
+            TF* const z0h,
+            const TF* const ustar,
+            const int* const water_mask,
+            const TF alpha_m,
+            const TF alpha_ch,
+            const TF alpha_h,
+            const int istart,
+            const int iend,
+            const int jstart,
+            const int jend,
+            const int icells)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+
+        if (i < iend && j < jend)
+        {
+            const int ij = i+j*icells;
+            if (water_mask[ij])
+            {
+                constexpr TF visc = TF(1.5e-5);
+                constexpr TF min_ustar = TF(1e-3);
+                const TF ustar_lim = max(ustar[ij], min_ustar);
+                z0m[ij] = alpha_m*visc/ustar_lim
+                        + alpha_ch*ustar_lim*ustar_lim/Constants::grav<TF>;
+                z0h[ij] = alpha_h*visc/ustar_lim;
+            }
+        }
+    }
 }
 
 namespace
@@ -94,7 +127,15 @@ void Boundary_surface_lsm<TF>::exec(
     TF* du_tot = tmp1->fld_bot_g;
 
     if (sw_charnock)
-        throw std::runtime_error("Charnock not (yet) implemented on the GPU...");
+    {
+        calc_z0_charnock_g<TF><<<grid_gpu_2d, block_gpu_2d>>>(
+                z0m_g, z0h_g, ustar_g, water_mask_g,
+                alpha_m, alpha_ch, alpha_h,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.icells);
+        boundary_cyclic.exec_2d_g(z0m_g);
+        boundary_cyclic.exec_2d_g(z0h_g);
+        cuda_check_error();
+    }
 
     bsk::calc_dutot_g<TF><<<grid_gpu_2d, block_gpu_2d>>>(
         du_tot,
@@ -138,7 +179,8 @@ void Boundary_surface_lsm<TF>::exec(
     TF* rhorefh = thermo.get_basestate_fld_g("rhoh");
     TF* thvrefh = thermo.get_basestate_fld_g("thvh");
     TF* exnrefh = thermo.get_basestate_fld_g("exnerh");
-    TF* prefh   = thermo.get_basestate_fld_g("prefh");
+    TF* prefh   = thermo.get_basestate_fld_g("ph");
+    const bool pressure_is_3d = thermo.pressure_is_3d();
 
     // Get surface precipitation (positive downwards, kg m-2 s-1 = mm s-1)
     auto tmp2 = fields.get_tmp_g();
@@ -312,6 +354,8 @@ void Boundary_surface_lsm<TF>::exec(
                 buoy->fld_bot_g,
                 rhorefh,
                 exnrefh,
+                prefh,
+                pressure_is_3d,
                 db_ref, emis_sfc,
                 TF(subdt),
                 gd.istart, gd.iend,
@@ -354,6 +398,7 @@ void Boundary_surface_lsm<TF>::exec(
                 rhorefh,
                 prefh,
                 exnrefh,
+                pressure_is_3d,
                 gd.istart, gd.iend,
                 gd.jstart, gd.jend,
                 gd.kstart,
@@ -728,8 +773,9 @@ void Boundary_surface_lsm<TF>::exec(
 }
 
 template<typename TF>
-void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column)
+void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column, Thermo<TF>& thermo)
 {
+    const auto& gd = grid.get_grid_data();
     const TF no_offset = 0.;
 
     auto tmp = fields.get_tmp_g();
@@ -737,6 +783,12 @@ void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column)
     column.calc_time_series("obuk", obuk_g, no_offset);
     column.calc_time_series("ustar", ustar_g, no_offset);
     column.calc_time_series("wl", fields.ap2d.at("wl")->fld_g, no_offset);
+
+    if (sw_charnock)
+    {
+        column.calc_time_series("z0m", z0m_g, no_offset);
+        column.calc_time_series("z0h", z0h_g, no_offset);
+    }
 
     get_tiled_mean_g(tmp->fld_bot_g, "H", TF(1));
     column.calc_time_series("H", tmp->fld_bot_g, no_offset);
@@ -749,6 +801,34 @@ void Boundary_surface_lsm<TF>::exec_column(Column<TF>& column)
 
     get_tiled_mean_g(tmp->fld_bot_g, "S", TF(1));
     column.calc_time_series("S", tmp->fld_bot_g, no_offset);
+
+    auto diagnostics = fields.get_tmp_g();
+    const dim3 block(gd.ithread_block, gd.jthread_block);
+    const dim3 blocks((gd.imax+block.x-1)/block.x, (gd.jmax+block.y-1)/block.y);
+    lsmk::diagnose_1_5m_10m_MO_g<TF><<<blocks, block>>>(
+            diagnostics->fld_bot_g,
+            diagnostics->fld_top_g,
+            diagnostics->flux_bot_g,
+            diagnostics->flux_top_g,
+            diagnostics->grad_top_g,
+            fields.ap.at("thl")->fld_bot_g,
+            fields.ap.at("qt")->fld_bot_g,
+            fields.ap.at("thl")->flux_bot_g,
+            fields.ap.at("qt")->flux_bot_g,
+            fields.ap.at("u")->flux_bot_g,
+            fields.ap.at("v")->flux_bot_g,
+            ustar_g, obuk_g, z0m_g, z0h_g,
+            thermo.get_basestate_fld_g("ph"), thermo.pressure_is_3d(),
+            gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart,
+            gd.icells, gd.ijcells);
+    cuda_check_error();
+
+    column.calc_time_series("T_1_5m", diagnostics->fld_bot_g, no_offset);
+    column.calc_time_series("q_1_5m", diagnostics->fld_top_g, no_offset);
+    column.calc_time_series("u_10m", diagnostics->flux_bot_g, no_offset);
+    column.calc_time_series("v_10m", diagnostics->flux_top_g, no_offset);
+    column.calc_time_series("U_10m", diagnostics->grad_top_g, no_offset);
+    fields.release_tmp_g(diagnostics);
 
     if (sw_tile_stats_col)
         for (auto& tile : tiles)
@@ -1078,6 +1158,12 @@ void Boundary_surface_lsm<TF>::backward_device(Thermo<TF>& thermo)
     // NOTE: only copy back the required/useful data...
     cuda_safe_call(cudaMemcpy(obuk.data(),  obuk_g,  tf_memsize_ij, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(ustar.data(), ustar_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
+
+    if (sw_charnock)
+    {
+        cuda_safe_call(cudaMemcpy(z0m.data(), z0m_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
+        cuda_safe_call(cudaMemcpy(z0h.data(), z0h_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
+    }
 
     cuda_safe_call(cudaMemcpy(dudz_mo.data(), dudz_mo_g, tf_memsize_ij, cudaMemcpyDeviceToHost));
     cuda_safe_call(cudaMemcpy(dvdz_mo.data(), dvdz_mo_g, tf_memsize_ij, cudaMemcpyDeviceToHost));

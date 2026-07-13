@@ -132,6 +132,7 @@ class Force
         #ifdef USECUDA
         cuda_vector<TF> ug_g;  ///< Pointer to GPU array u-component geostrophic wind.
         cuda_vector<TF> vg_g;  ///< Pointer to GPU array v-component geostrophic wind.
+        cuda_vector<TF> fc_2d_g; ///< Spatial Coriolis parameter.
         cuda_vector<TF> wls_g; ///< Pointer to GPU array large-scale vertical velocity.
         cuda_vector<TF> nudge_factor_g; ///< Pointer to GPU array nudge factor.
         cuda_vector<TF> nudge_tend_g; ///< Nudging tendency profile.

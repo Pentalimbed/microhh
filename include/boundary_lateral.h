@@ -58,6 +58,12 @@ class Boundary_lateral
         void update_time_dependent(Timeloop<TF>&, const bool pres_fix=false);
         unsigned long get_time_limit(unsigned long);
 
+        #ifdef USECUDA
+        void prepare_device();
+        void forward_device();
+        void clear_device();
+        #endif
+
     private:
         Master& master;
         Grid<TF>& grid;
@@ -79,15 +85,15 @@ class Boundary_lateral
 
         // Sponge/diffusion layer:
         bool sw_sponge;
-        int n_sponge;
-        TF tau_sponge;
-        TF w_diff;
+        int n_sponge = 0;
+        TF tau_sponge = 1;
+        TF w_diff = 0;
 
         // Turbulence recycling.
         std::map<Lbc_location, bool> sw_recycle;
         std::vector<std::string> recycle_list;
-        TF tau_recycle;
-        int recycle_offset;
+        TF tau_recycle = 1;
+        int recycle_offset = 0;
 
         // Current (constant or time interpolated) BCs:
         Lbc_map<TF> lbc_w;
@@ -119,6 +125,15 @@ class Boundary_lateral
         std::vector<TF> w_top_2d;
         std::vector<TF> w_top_2d_prev;
         std::vector<TF> w_top_2d_next;
+
+        #ifdef USECUDA
+        using Lbc_map_g = std::map<std::string, cuda_vector<TF>>;
+        Lbc_map_g lbc_w_g;
+        Lbc_map_g lbc_e_g;
+        Lbc_map_g lbc_s_g;
+        Lbc_map_g lbc_n_g;
+        cuda_vector<TF> w_top_2d_g;
+        #endif
 
         const std::string tend_name = "lbc_sponge";
         const std::string tend_longname = "Lateral sponge layer";

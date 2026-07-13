@@ -1305,6 +1305,7 @@ unsigned long Boundary_lateral<TF>::get_time_limit(unsigned long itime)
 }
 
 
+#ifndef USECUDA
 template <typename TF>
 void Boundary_lateral<TF>::set_ghost_cells(
         Timeloop<TF>& timeloop)
@@ -1444,8 +1445,10 @@ void Boundary_lateral<TF>::set_ghost_cells(
 
     //throw 1;
 }
+#endif
 
 
+#ifndef USECUDA
 template <typename TF>
 void Boundary_lateral<TF>::exec_lateral_sponge(
         Stats<TF>& stats)
@@ -1601,6 +1604,7 @@ void Boundary_lateral<TF>::exec_lateral_sponge(
         stats.calc_tend(*fields.at.at(fld), tend_name);
     }
 }
+#endif
 
 
 template <typename TF>
@@ -1752,6 +1756,10 @@ void Boundary_lateral<TF>::update_time_dependent(
                     gd.kcells * (gd.jgc+n_sponge) * gd.icells,
                     f0);
     }
+
+    #ifdef USECUDA
+    forward_device();
+    #endif
 }
 
 

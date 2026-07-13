@@ -49,6 +49,7 @@ class Subdomain
 
         void create();
         unsigned long get_time_limit(unsigned long);
+        bool is_enabled() const { return sw_subdomain; }
         void save_bcs(Timeloop<TF>&);
 
     private:

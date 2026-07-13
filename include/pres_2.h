@@ -76,6 +76,18 @@ class Pres_2 : public Pres<TF>
         cuda_vector<TF> a_g;
         cuda_vector<TF> c_g;
         cuda_vector<TF> work2d_g;
+        cuda_vector<TF> dct_x_real_g;
+        cuda_vector<TF> dct_x_complex_g;
+        cuda_vector<TF> dct_y_real_g;
+        cuda_vector<TF> dct_y_complex_g;
+        cufftHandle dct_x_forward_plan = 0;
+        cufftHandle dct_x_backward_plan = 0;
+        cufftHandle dct_y_forward_plan = 0;
+        cufftHandle dct_y_backward_plan = 0;
+
+        void make_dct_plans();
+        void dct_forward(TF*);
+        void dct_backward(TF*);
         #endif
 
         void input(TF* const restrict,

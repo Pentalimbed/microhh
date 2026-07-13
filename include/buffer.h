@@ -51,6 +51,7 @@ class Buffer
 
         // GPU functions and variables
         void prepare_device(); ///< Allocate and copy buffer profiles at/to GPU
+        void forward_device(); ///< Copy updated buffer fields to the GPU.
         void clear_device(); ///< Allocate and copy buffer profiles at/to GPU
 
     private:

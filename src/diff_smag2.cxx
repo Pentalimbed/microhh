@@ -903,6 +903,15 @@ void Diff_smag2<TF>::exec_stats(Stats<TF>& stats, Thermo<TF>& thermo)
 
     if (sw_anisotropic)
     {
+        #ifdef USECUDA
+        fields.backward_field_device_3d(
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_h")->fld_g);
+        fields.backward_field_device_3d(
+                fields.sd.at("evisc_v")->fld.data(),
+                fields.sd.at("evisc_v")->fld_g);
+        #endif
+
         stats.calc_stats("evisc_h", *fields.sd.at("evisc_h"), no_offset, no_threshold);
         stats.calc_stats("evisc_v", *fields.sd.at("evisc_v"), no_offset, no_threshold);
     }
@@ -917,6 +926,17 @@ void Diff_smag2<TF>::diff_flux(Field3d<TF>& restrict out, const Field3d<TF>& res
 
     if (sw_anisotropic)
     {
+        #ifdef USECUDA
+        // Diffusive-flux statistics run on the host, while anisotropic
+        // viscosities are diagnostic fields updated only on the device.
+        fields.backward_field_device_3d(
+                fields.sd.at("evisc_h")->fld.data(),
+                fields.sd.at("evisc_h")->fld_g);
+        fields.backward_field_device_3d(
+                fields.sd.at("evisc_v")->fld.data(),
+                fields.sd.at("evisc_v")->fld_g);
+        #endif
+
         // Calculate the interior.
         if (fld_in.loc[0] == 1)
             dka::calc_diff_flux_u<TF>(

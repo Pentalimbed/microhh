@@ -21,10 +21,12 @@
  */
 
 #include <algorithm>
+#include <cstdio>
 #include "master.h"
 #include "grid.h"
 #include "fields.h"
 #include "field3d_operators.h"
+#include "field3d_io.h"
 #include "timeloop.h"
 #include "timedep.h"
 #include "stats.h"
@@ -44,6 +46,53 @@ using namespace Finite_difference::O2;
 
 namespace
 {
+    template<typename TF> __global__
+    void coriolis_geo3d_g(
+            TF* const ut, TF* const vt,
+            const TF* const u, const TF* const v,
+            const TF* const ug, const TF* const vg,
+            const TF* const fc_2d,
+            const TF ugrid, const TF vgrid,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart, const int kend,
+            const int icells, const int ijcells)
+    {
+        const int i = blockIdx.x*blockDim.x+threadIdx.x+istart;
+        const int j = blockIdx.y*blockDim.y+threadIdx.y+jstart;
+        const int k = blockIdx.z+kstart;
+        if (i >= iend || j >= jend || k >= kend) return;
+        const int ij = i+j*icells;
+        const int ijk = ij+k*ijcells;
+        const TF fc_u = TF(.5)*(fc_2d[ij-1]+fc_2d[ij]);
+        const TF fc_v = TF(.5)*(fc_2d[ij-icells]+fc_2d[ij]);
+        ut[ijk] += fc_u*(TF(.25)*(v[ijk-1]+v[ijk]+v[ijk-1+icells]+v[ijk+icells])+vgrid-vg[ijk]);
+        vt[ijk] -= fc_v*(TF(.25)*(u[ijk-icells]+u[ijk]+u[ijk+1-icells]+u[ijk+1])+ugrid-ug[ijk]);
+    }
+
+    template<typename TF> __global__
+    void rotation_2d_g(
+            TF* const ut, TF* const vt,
+            const TF* const u, const TF* const v,
+            const TF* const fc_2d,
+            const TF ugrid, const TF vgrid,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart, const int kend,
+            const int icells, const int ijcells)
+    {
+        const int i = blockIdx.x*blockDim.x+threadIdx.x+istart;
+        const int j = blockIdx.y*blockDim.y+threadIdx.y+jstart;
+        const int k = blockIdx.z+kstart;
+        if (i >= iend || j >= jend || k >= kend) return;
+        const int ij = i+j*icells;
+        const int ijk = ij+k*ijcells;
+        const TF fc_u = TF(.5)*(fc_2d[ij-1]+fc_2d[ij]);
+        const TF fc_v = TF(.5)*(fc_2d[ij-icells]+fc_2d[ij]);
+        ut[ijk] += fc_u*(TF(.25)*(v[ijk-1]+v[ijk]+v[ijk-1+icells]+v[ijk+icells])+vgrid);
+        vt[ijk] -= fc_v*(TF(.25)*(u[ijk-icells]+u[ijk]+u[ijk+1-icells]+u[ijk+1])+ugrid);
+    }
+
     template<typename TF> __global__
     void add_pressure_force_g(TF* const __restrict__ ut,
                        const TF fbody,
@@ -173,6 +222,21 @@ void Force<TF>::prepare_device()
 
         cuda_safe_call(cudaMemcpy(ug_g, ug.data(), nmemsize, cudaMemcpyHostToDevice));
         cuda_safe_call(cudaMemcpy(vg_g, vg.data(), nmemsize, cudaMemcpyHostToDevice));
+    }
+    else if (swlspres == Large_scale_pressure_type::Geo_wind_3d)
+    {
+        ug_g.allocate(gd.ncells);
+        vg_g.allocate(gd.ncells);
+        fc_2d_g.allocate(gd.ijcells);
+        cuda_safe_call(cudaMemcpy(ug_g, ug.data(), gd.ncells*sizeof(TF), cudaMemcpyHostToDevice));
+        cuda_safe_call(cudaMemcpy(vg_g, vg.data(), gd.ncells*sizeof(TF), cudaMemcpyHostToDevice));
+        cuda_safe_call(cudaMemcpy(fc_2d_g, fc_2d.data(), gd.ijcells*sizeof(TF), cudaMemcpyHostToDevice));
+    }
+
+    if (swrotation_2d && swlspres != Large_scale_pressure_type::Geo_wind_3d)
+    {
+        fc_2d_g.allocate(gd.ijcells);
+        cuda_safe_call(cudaMemcpy(fc_2d_g, fc_2d.data(), gd.ijcells*sizeof(TF), cudaMemcpyHostToDevice));
     }
 
     if (swls == Large_scale_tendency_type::Enabled)
@@ -322,6 +386,29 @@ void Force<TF>::exec(double dt, Thermo<TF>& thermo, Stats<TF>& stats)
 
         stats.calc_tend(*fields.mt.at("u"), tend_name_cor);
         stats.calc_tend(*fields.mt.at("v"), tend_name_cor);
+    }
+    else if (swlspres == Large_scale_pressure_type::Geo_wind_3d)
+    {
+        coriolis_geo3d_g<TF><<<gridGPU, blockGPU>>>(
+                fields.mt.at("u")->fld_g, fields.mt.at("v")->fld_g,
+                fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g,
+                ug_g, vg_g, fc_2d_g, gd.utrans, gd.vtrans,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+        stats.calc_tend(*fields.mt.at("u"), tend_name_cor);
+        stats.calc_tend(*fields.mt.at("v"), tend_name_cor);
+    }
+
+    if (swrotation_2d)
+    {
+        rotation_2d_g<TF><<<gridGPU, blockGPU>>>(
+                fields.mt.at("u")->fld_g, fields.mt.at("v")->fld_g,
+                fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g,
+                fc_2d_g, gd.utrans, gd.vtrans,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
     }
 
     if (swls == Large_scale_tendency_type::Enabled)
@@ -488,6 +575,50 @@ void Force<TF>::update_time_dependent(Timeloop<TF>& timeloop)
     {
         tdep_geo.at("u_geo")->update_time_dependent_prof_g(ug_g, timeloop);
         tdep_geo.at("v_geo")->update_time_dependent_prof_g(vg_g, timeloop);
+    }
+    else if (swlspres == Large_scale_pressure_type::Geo_wind_3d && swtimedep_geo)
+    {
+        auto& gd = grid.get_grid_data();
+        constexpr TF no_offset = TF(0);
+        const unsigned long itime = timeloop.get_itime();
+
+        if (itime > itime_ugeo_next)
+        {
+            const unsigned long iiotimeprec = timeloop.get_iiotimeprec();
+            const unsigned long loadtime = convert_to_itime(ugeo_loadtime);
+            itime_ugeo_prev = itime_ugeo_next;
+            itime_ugeo_next = itime_ugeo_prev+loadtime;
+            const int iotime = int(itime_ugeo_next/iiotimeprec);
+            ug_prev = ug_next;
+            vg_prev = vg_next;
+
+            Field3d_io field3d_io(master, grid);
+            auto tmp1 = fields.get_tmp();
+            auto tmp2 = fields.get_tmp();
+            int nerror = 0;
+            auto read_field = [&](const std::string& name, std::vector<TF>& field)
+            {
+                char filename[256];
+                std::sprintf(filename, "%s.%07d", name.c_str(), iotime);
+                nerror += field3d_io.load_field3d(field.data(), tmp1->fld.data(), tmp2->fld.data(),
+                        filename, no_offset, gd.kstart, gd.kend);
+            };
+            read_field("ug", ug_next);
+            read_field("vg", vg_next);
+            fields.release_tmp(tmp1);
+            fields.release_tmp(tmp2);
+            if (nerror) throw std::runtime_error("Error reading time dependent geostrophic wind");
+        }
+
+        const TF f0 = TF(1)-TF(itime-itime_ugeo_prev)/TF(itime_ugeo_next-itime_ugeo_prev);
+        const TF f1 = TF(1)-f0;
+        for (int n=0; n<gd.ncells; ++n)
+        {
+            ug[n] = f0*ug_prev[n]+f1*ug_next[n];
+            vg[n] = f0*vg_prev[n]+f1*vg_next[n];
+        }
+        cuda_safe_call(cudaMemcpy(ug_g, ug.data(), gd.ncells*sizeof(TF), cudaMemcpyHostToDevice));
+        cuda_safe_call(cudaMemcpy(vg_g, vg.data(), gd.ncells*sizeof(TF), cudaMemcpyHostToDevice));
     }
 
     if (swwls == Large_scale_subsidence_type::Mean_field ||

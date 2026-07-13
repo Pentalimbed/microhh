@@ -45,6 +45,7 @@
 #include "cuda_launcher.h"
 #include "diff_smag2_kl_kernels.cuh"
 #include "diff_kl_kernels.cuh"
+#include "diff_anisotropic_kernels.cuh"
 
 /* Calculate the mixing length (mlen) offline, and put on GPU */
 #ifdef USECUDA
@@ -107,6 +108,29 @@ void Diff_smag2<TF>::exec_viscosity(Stats<TF>&, Thermo<TF>& thermo)
 
     dim3 grid2dGPU (grid2di, grid2dj);
     dim3 block2dGPU(blocki, blockj);
+
+    if (sw_anisotropic)
+    {
+        const bool surface = boundary.get_switch() != "default";
+        launch_grid_kernel<Diff_les_kernels::calc_strain2_g<TF, true>>(
+                grid_layout,
+                fields.sd.at("evisc_h")->fld_g.view(),
+                fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g, fields.mp.at("w")->fld_g,
+                surface ? boundary.get_dudz_g().data() : nullptr,
+                surface ? boundary.get_dvdz_g().data() : nullptr,
+                gd.dzi_g, gd.dzhi_g, gd.dxi, gd.dyi);
+        auto N2 = fields.get_tmp_g();
+        thermo.get_thermo_field_g(*N2, "N2", false);
+        launch_grid_kernel<Diff_anisotropic_kernels::evisc_g<TF>>(
+                grid_layout,
+                fields.sd.at("evisc_h")->fld_g.view(), fields.sd.at("evisc_v")->fld_g.view(),
+                N2->fld_g, boundary.get_dbdz_g(), gd.z_g, boundary.get_z0m_g(),
+                mlen0_h, mlen0_v, TF(cs), tPr);
+        fields.release_tmp_g(N2);
+        boundary_cyclic.exec_g(fields.sd.at("evisc_h")->fld_g);
+        boundary_cyclic.exec_g(fields.sd.at("evisc_v")->fld_g);
+        return;
+    }
 
     // Use surface model.
     if (boundary.get_switch() != "default")
@@ -245,6 +269,32 @@ void Diff_smag2<TF>::exec(Stats<TF>& stats)
     const TF dyidyi = TF(1)/(gd.dy * gd.dy);
     const TF tPri = TF(1)/tPr;
 
+    if (sw_anisotropic)
+    {
+        launch_grid_kernel<Diff_anisotropic_kernels::diff_uvw_g<TF>>(
+                grid_layout,
+                fields.mt.at("u")->fld_g.view(), fields.mt.at("v")->fld_g.view(), fields.mt.at("w")->fld_g.view(),
+                fields.sd.at("evisc_h")->fld_g, fields.sd.at("evisc_v")->fld_g,
+                fields.mp.at("u")->fld_g, fields.mp.at("v")->fld_g, fields.mp.at("w")->fld_g,
+                fields.mp.at("u")->flux_bot_g, fields.mp.at("u")->flux_top_g,
+                fields.mp.at("v")->flux_bot_g, fields.mp.at("v")->flux_top_g,
+                gd.dzi_g, gd.dzhi_g, gd.dxi, gd.dyi,
+                fields.rhoref_g, fields.rhorefh_g, fields.rhorefi_g, fields.rhorefhi_g, fields.visc);
+        for (auto& item : fields.st)
+            launch_grid_kernel<Diff_anisotropic_kernels::diff_c_g<TF>>(
+                    grid_layout, item.second->fld_g.view(), fields.sp.at(item.first)->fld_g,
+                    fields.sd.at("evisc_h")->fld_g, fields.sd.at("evisc_v")->fld_g,
+                    fields.sp.at(item.first)->flux_bot_g, fields.sp.at(item.first)->flux_top_g,
+                    gd.dzi_g, gd.dzhi_g, dxidxi, dyidyi,
+                    fields.rhorefi_g, fields.rhorefh_g, tPri, fields.sp.at(item.first)->visc);
+        cudaDeviceSynchronize();
+        stats.calc_tend(*fields.mt.at("u"), tend_name);
+        stats.calc_tend(*fields.mt.at("v"), tend_name);
+        stats.calc_tend(*fields.mt.at("w"), tend_name);
+        for (auto& item : fields.st) stats.calc_tend(*item.second, tend_name);
+        return;
+    }
+
     // Do not use surface model.
     if (boundary.get_switch() == "default")
     {
@@ -359,16 +409,17 @@ unsigned long Diff_smag2<TF>::get_time_limit(unsigned long idt, double dt)
     auto tmp1 = fields.get_tmp_g();
 
     // Calculate dnmul in tmp1 field
-    dk::calc_dnmul_g<TF><<<gridGPU, blockGPU>>>(
-            tmp1->fld_g,
-            fields.sd.at("evisc")->fld_g,
-            gd.dzi_g,
-            tPrfac_i,
-            dxidxi, dyidyi,
-            gd.istart, gd.iend,
-            gd.jstart, gd.jend,
-            gd.kstart, gd.kend,
-            gd.icells, gd.ijcells);
+    if (sw_anisotropic)
+        Diff_anisotropic_kernels::dnmul_g<TF><<<gridGPU, blockGPU>>>(
+                tmp1->fld_g, fields.sd.at("evisc_h")->fld_g, fields.sd.at("evisc_v")->fld_g,
+                gd.dzi_g, dxidxi, dyidyi, tPrfac_i,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+    else
+        dk::calc_dnmul_g<TF><<<gridGPU, blockGPU>>>(
+                tmp1->fld_g, fields.sd.at("evisc")->fld_g, gd.dzi_g, tPrfac_i,
+                dxidxi, dyidyi, gd.istart, gd.iend, gd.jstart, gd.jend,
+                gd.kstart, gd.kend, gd.icells, gd.ijcells);
 
     cuda_check_error();
 
@@ -406,16 +457,17 @@ double Diff_smag2<TF>::get_dn(double dt)
     // Calculate dnmul in tmp1 field
     auto dnmul_tmp = fields.get_tmp_g();
 
-    dk::calc_dnmul_g<TF><<<gridGPU, blockGPU>>>(
-            dnmul_tmp->fld_g,
-            fields.sd.at("evisc")->fld_g,
-            gd.dzi_g,
-            tPrfac_i,
-            dxidxi, dyidyi,
-            gd.istart, gd.iend,
-            gd.jstart, gd.jend,
-            gd.kstart, gd.kend,
-            gd.icells, gd.ijcells);
+    if (sw_anisotropic)
+        Diff_anisotropic_kernels::dnmul_g<TF><<<gridGPU, blockGPU>>>(
+                dnmul_tmp->fld_g, fields.sd.at("evisc_h")->fld_g, fields.sd.at("evisc_v")->fld_g,
+                gd.dzi_g, dxidxi, dyidyi, tPrfac_i,
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+    else
+        dk::calc_dnmul_g<TF><<<gridGPU, blockGPU>>>(
+                dnmul_tmp->fld_g, fields.sd.at("evisc")->fld_g, gd.dzi_g, tPrfac_i,
+                dxidxi, dyidyi, gd.istart, gd.iend, gd.jstart, gd.jend,
+                gd.kstart, gd.kend, gd.icells, gd.ijcells);
 
     cuda_check_error();
 
