@@ -958,7 +958,8 @@ void Boundary_lateral<TF>::read_lbc(
             //const size_t offset = time_index * size * sizeof(TF);
             //fseek(pFile, offset, SEEK_SET);
 
-            if (fread(vec.data(), sizeof(TF), size, pFile) != (unsigned)size)
+            if (fread(vec.data(), sizeof(TF), size, pFile) != (unsigned)size
+                    || std::fgetc(pFile) != EOF)
                 success = false;
         }
 

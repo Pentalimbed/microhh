@@ -166,9 +166,9 @@ xz=None
 yz=None
 
 [limiter]
-limitlist=qt,qr,qs,qg
+limitlist=None
 
 [dump]
 swdump=1
 sampletime=360
-dumplist=ql,qi,u,v,w
+dumplist=u,v,w,ql,qi,qr,qs,qg

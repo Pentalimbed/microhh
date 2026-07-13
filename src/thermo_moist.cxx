@@ -1501,24 +1501,33 @@ void Thermo_moist<TF>::save(const int iotime)
             nerror++;
         }
         else
-            master.print_message("OK\n");
+        {
+            auto write = [&](const std::vector<TF>& profile, const int size)
+            {
+                return fwrite(&profile[gd.kstart], sizeof(TF), size, pFile) == size;
+            };
 
-        fwrite(&bs.thl0 [gd.kstart], sizeof(TF), gd.ktot, pFile);
-        fwrite(&bs.qt0  [gd.kstart], sizeof(TF), gd.ktot, pFile);
+            const bool writes_succeeded =
+                    write(bs.thl0, gd.ktot)
+                    && write(bs.qt0, gd.ktot)
+                    && write(bs.thvref, gd.ktot)
+                    && write(bs.thvrefh, gd.ktot+1)
+                    && write(bs.pref, gd.ktot)
+                    && write(bs.prefh, gd.ktot+1)
+                    && write(bs.exnref, gd.ktot)
+                    && write(bs.exnrefh, gd.ktot+1)
+                    && write(bs.rhoref, gd.ktot)
+                    && write(bs.rhorefh, gd.ktot+1);
+            const bool success = fclose(pFile) == 0 && writes_succeeded;
 
-        fwrite(&bs.thvref [gd.kstart], sizeof(TF), gd.ktot  , pFile);
-        fwrite(&bs.thvrefh[gd.kstart], sizeof(TF), gd.ktot+1, pFile);
-
-        fwrite(&bs.pref [gd.kstart], sizeof(TF), gd.ktot  , pFile);
-        fwrite(&bs.prefh[gd.kstart], sizeof(TF), gd.ktot+1, pFile);
-
-        fwrite(&bs.exnref [gd.kstart], sizeof(TF), gd.ktot  , pFile);
-        fwrite(&bs.exnrefh[gd.kstart], sizeof(TF), gd.ktot+1, pFile);
-
-        fwrite(&bs.rhoref [gd.kstart], sizeof(TF), gd.ktot  , pFile);
-        fwrite(&bs.rhorefh[gd.kstart], sizeof(TF), gd.ktot+1, pFile);
-
-        fclose(pFile);
+            if (success)
+                master.print_message("OK\n");
+            else
+            {
+                master.print_message("FAILED\n");
+                nerror++;
+            }
+        }
     }
 
     auto tmp1 = fields.get_tmp();

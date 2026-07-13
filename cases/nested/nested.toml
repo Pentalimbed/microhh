@@ -1,9 +1,9 @@
 [case]
-microhh_name = "era5_openbc"
+microhh_name = "maartensdijk"
 base_ini = "era5_openbc.ini.base"
 work_dir = "."
-start = "2014-11-15T11:00:00Z"
-end = "2014-11-15T16:00:00Z"
+start = "2026-06-27T14:00:00Z"
+end = "2026-06-27T17:00:00Z"
 float_type = "float32"
 swmicro = "nsw6"
 npx = 1
@@ -35,9 +35,9 @@ radiation_accumulation_seconds = 3600.0
 
 [radiation]
 # Options: "none", "prescribed", "rrtmgp", "rrtmgp_rt".
-scheme = "prescribed"
+scheme = "rrtmgp"
 swtimedep_background = false
-copy_coefficients = false
+copy_coefficients = true
 gpt_set = "128_112"
 microhh_root = "../.."
 link_coefficients = true
@@ -50,33 +50,39 @@ kngrid_j = 64
 kngrid_k = 32
 
 [run]
-warmup_frequency = 600
-start = "2014-11-15T14:00:00Z"
-end = "2014-11-15T14:20:00Z"
+warmup_frequency = 1200
+start = "2026-06-27T15:00:00Z"
+end = "2026-06-27T15:20:00Z"
 bcs_frequency = 30
 dump_frequency = 120
+
+[vertical_grid]
+# Options: "equidistant", "linear_stretched", "stretched".
+type = "linear_stretched"
+ktot = 250
+dz0 = 10
+alpha = 0.012
+# For stretched, replace alpha with:
+nloc1 = 60
+nbuf1 = 20
+dz1 = 120
+# Optional second transition: nloc2, nbuf2, dz2.
 
 [[domains]]
 name = "dom0"
 xsize = 145800
 ysize = 145800
-zsize = 14400
 itot = 450
 jtot = 450
-ktot = 200
-n_ghost = 3
-n_sponge = 3
+n_sponge = 5
 anchor = "center"
 
 [[domains]]
 name = "dom1"
 xsize = 48600
 ysize = 48600
-zsize = 14400
 itot = 450
 jtot = 450
-ktot = 200
-n_ghost = 3
 n_sponge = 3
 center_in_parent = true
 
@@ -84,11 +90,8 @@ center_in_parent = true
 name = "dom2"
 xsize = 16200
 ysize = 16200
-zsize = 7200
 itot = 450
 jtot = 450
-ktot = 200
-n_ghost = 3
 n_sponge = 3
 center_in_parent = true
 
@@ -96,10 +99,7 @@ center_in_parent = true
 name = "dom3"
 xsize = 5400
 ysize = 5400
-zsize = 2400
 itot = 450
 jtot = 450
-ktot = 200
-n_ghost = 3
 n_sponge = 3
 center_in_parent = true

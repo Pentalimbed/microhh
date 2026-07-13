@@ -48,16 +48,18 @@ run = None
 if run_name == "warmup":
     run = {"init": True, "clean": True, "run": True}
     i = 0
+    run_dir = "warmup"
 elif run_name == "run":
     if "run" not in cfg:
         raise SystemExit("Run command requires [run] in the TOML.")
     i = domain_arg
-    run = {"init": i > 0, "clean": i > 0, "run": True}
+    run = {"init": i > 0, "clean": True, "run": True}
+    run_dir = cfg["domains"][i].get("name", f"dom{i}")
 else:
     raise SystemExit(f"Unknown run command: {run_name}")
 
 print(i)
-print(cfg["domains"][i].get("name", f"dom{i}"))
+print(run_dir)
 print(cfg["case"].get("microhh_name", "era5_openbc"))
 print(str(run.get("init", True) if run else True).lower())
 print(str(run.get("clean", True) if run else True).lower())

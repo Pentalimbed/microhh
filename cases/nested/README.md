@@ -15,10 +15,10 @@ uv run nested_input.py --config nested.toml --download-only
 `nested.toml` keeps only the fixed run knobs under `[run]`: the warmup
 save/dump frequency, the actual nesting interval as datetime strings, the
 subdomain BC output frequency, and the actual-run dump frequency. The warmup
-phase always covers the full `case.start` to `case.end` interval. `run 0` uses
-the nesting interval on the outer-domain restart clock and writes BCs for
-domain 1; `run N` for `N > 0` uses the same interval on a local zero-based
-clock.
+phase covers the full `case.start` to `case.end` preview in `warmup/`. `run 0`
+uses the selected warmup checkpoint in a separate `dom0/` directory and writes
+BCs for domain 1; `run N` for `N > 0` uses the same interval on a local
+zero-based clock.
 
 Child domains all use the same `[run]` interval. When `dom0` writes BCs from
 `run 0`, the generator links those parent-clock files onto the child's local
@@ -35,9 +35,8 @@ Individual steps can be run explicitly:
 ```
 
 The domain chain is the `[[domains]]` array in `nested.toml`. Add another
-`[[domains]]` entry to add another child domain. Child horizontal spacing and
-equidistant vertical spacing must be integer refinements of the parent grid.
-Child `zsize` may be lower than the parent `zsize`, but it may not exceed it.
-For shorter children, the child computes its top vertical velocity from lateral
-mass balance instead of reading parent-saved `w_top`, because MicroHH's
-subdomain writer saves `w_top` at the parent model top.
+`[[domains]]` entry to add another child domain. Child horizontal spacing must
+be an integer refinement of the parent grid. All domains share the single
+`[vertical_grid]` definition, which supports `equidistant`, LS2D's
+`linear_stretched`, and LS2D's one- or two-transition `stretched` grid. The
+generator prints the resulting domain-top height before preparing each run.

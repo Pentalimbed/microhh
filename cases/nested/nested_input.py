@@ -22,6 +22,7 @@ from pathlib import Path
 import netCDF4 as nc4
 import numpy as np
 import xarray as xr
+import ls2d
 
 from microhhpy.spatial import Domain, calc_vertical_grid_2nd
 from microhhpy.real import create_input_from_regular_latlon
@@ -160,47 +161,176 @@ def domain_dir(cfg: dict, domain_index: int) -> Path:
     return case_work_dir(cfg) / str(name)
 
 
-def make_grid(domain_cfg: dict, float_type) -> GridData:
-    ktot = int(domain_cfg.get("ktot", domain_cfg.get("kmax", 0)))
+def run_dir(cfg: dict, domain_index: int, run_name: str | None) -> Path:
+    if run_name == "warmup":
+        if domain_index != 0:
+            raise ValueError("The warmup phase is only available for domain 0.")
+        return case_work_dir(cfg) / "warmup"
+    return domain_dir(cfg, domain_index)
+
+
+def make_grid(cfg: dict, float_type) -> GridData:
+    grid_cfg = cfg.get("vertical_grid")
+    if not isinstance(grid_cfg, dict):
+        raise ValueError("TOML must contain a [vertical_grid] table.")
+
+    ktot = int(grid_cfg.get("ktot", 0))
     if ktot <= 0:
-        raise ValueError("Each domain must define ktot or kmax.")
+        raise ValueError("[vertical_grid].ktot must be positive.")
 
-    if "dz" in domain_cfg:
-        dz0 = float(domain_cfg["dz"])
-        zsize = ktot * dz0
-    elif "dz0" in domain_cfg:
-        dz0 = float(domain_cfg["dz0"])
-        zsize = ktot * dz0
-    elif "zsize" in domain_cfg:
-        zsize = float(domain_cfg["zsize"])
-        dz0 = zsize / ktot
-    else:
-        raise ValueError("Each domain must define zsize or dz/dz0.")
-
-    z = np.arange(dz0 / 2.0, zsize, dz0, dtype=float_type)
-    if z.size != ktot:
+    grid_type = str(grid_cfg.get("type", "equidistant")).lower()
+    if grid_type == "equidistant":
+        if "zsize" in grid_cfg:
+            zsize = float(grid_cfg["zsize"])
+            dz0 = zsize / ktot
+        elif "dz0" in grid_cfg:
+            dz0 = float(grid_cfg["dz0"])
+            zsize = ktot * dz0
+        else:
+            raise ValueError("Equidistant [vertical_grid] requires zsize or dz0.")
         z = (np.arange(ktot, dtype=float_type) + 0.5) * dz0
+    elif grid_type == "linear_stretched":
+        if "dz0" not in grid_cfg or "alpha" not in grid_cfg:
+            raise ValueError("Linear-stretched [vertical_grid] requires dz0 and alpha.")
+        dz0 = float(grid_cfg["dz0"])
+        alpha = float(grid_cfg["alpha"])
+        if alpha <= -1.0:
+            raise ValueError("[vertical_grid].alpha must be greater than -1.")
+        ls2d_grid = ls2d.grid.Grid_linear_stretched(kmax=ktot, dz0=dz0, alpha=alpha)
+        z = np.asarray(ls2d_grid.z, dtype=float_type)
+        zsize = float(ls2d_grid.zsize)
+    elif grid_type == "stretched":
+        required = ("dz0", "nloc1", "nbuf1", "dz1")
+        missing = [key for key in required if key not in grid_cfg]
+        if missing:
+            raise ValueError(
+                f"Stretched [vertical_grid] is missing: {', '.join(missing)}."
+            )
+
+        dz0 = float(grid_cfg["dz0"])
+        nloc1 = float(grid_cfg["nloc1"])
+        nbuf1 = float(grid_cfg["nbuf1"])
+        dz1 = float(grid_cfg["dz1"])
+        second_keys = ("nloc2", "nbuf2", "dz2")
+        configured_second = [key for key in second_keys if key in grid_cfg]
+        if configured_second and len(configured_second) != len(second_keys):
+            raise ValueError(
+                "The second stretched-grid transition requires nloc2, nbuf2, and dz2."
+            )
+
+        for name, value in (("nbuf1", nbuf1), ("dz1", dz1)):
+            if value <= 0.0:
+                raise ValueError(f"[vertical_grid].{name} must be positive.")
+        if not 0.0 <= nloc1 <= ktot:
+            raise ValueError("[vertical_grid].nloc1 must be between 0 and ktot.")
+
+        kwargs = {}
+        if configured_second:
+            nloc2 = float(grid_cfg["nloc2"])
+            nbuf2 = float(grid_cfg["nbuf2"])
+            dz2 = float(grid_cfg["dz2"])
+            if not 0.0 <= nloc2 <= ktot:
+                raise ValueError("[vertical_grid].nloc2 must be between 0 and ktot.")
+            if nbuf2 <= 0.0 or dz2 <= 0.0:
+                raise ValueError("[vertical_grid].nbuf2 and dz2 must be positive.")
+            kwargs = {"nloc2": nloc2, "nbuf2": nbuf2, "dz2": dz2}
+
+        ls2d_grid = ls2d.grid.Grid_stretched(
+            kmax=ktot,
+            dz0=dz0,
+            nloc1=nloc1,
+            nbuf1=nbuf1,
+            dz1=dz1,
+            **kwargs,
+        )
+        z = np.asarray(ls2d_grid.z, dtype=float_type)
+        zsize = float(ls2d_grid.zsize)
+    else:
+        raise ValueError(
+            f"Unsupported [vertical_grid].type {grid_type!r}; use 'equidistant', "
+            "'linear_stretched', or 'stretched'."
+        )
+
+    if grid_type != "equidistant":
+        if "zsize" in grid_cfg and not np.isclose(
+                float(grid_cfg["zsize"]), zsize, rtol=1e-10, atol=1e-8):
+            raise ValueError(
+                f"Stretched zsize is derived as {zsize}; remove the conflicting "
+                f"configured value {grid_cfg['zsize']}."
+            )
+
+    if dz0 <= 0.0:
+        raise ValueError("[vertical_grid].dz0 must be positive.")
+    if zsize <= 0.0:
+        raise ValueError("[vertical_grid].zsize must be positive.")
 
     gd = calc_vertical_grid_2nd(z, zsize, float_type=float_type)
     return GridData(dz0=dz0, **gd)
 
 
+def validate_shared_vertical_grid(cfg: dict):
+    vertical_keys = {"ktot", "kmax", "zsize", "dz", "dz0", "alpha", "vertical_grid"}
+    for i, domain_cfg in enumerate(cfg["domains"]):
+        configured = sorted(vertical_keys.intersection(domain_cfg))
+        if configured:
+            raise ValueError(
+                f"Remove vertical settings from domains[{i}] ({', '.join(configured)}); "
+                "all domains use [vertical_grid]."
+            )
+
+
+def horizontal_ghost_cells(swspatialorder, swadvec) -> int:
+    spatial_order = str(swspatialorder).lower()
+    advection = str(swadvec).lower()
+    ghost_cells = {
+        ("2", "0"): 1,
+        ("2", "2"): 1,
+        ("2", "2i4"): 2,
+        ("2", "2i5"): 3,
+        ("2", "2i6"): 3,
+        ("2", "2i62"): 3,
+        ("4", "0"): 3,
+        ("4", "4"): 3,
+        ("4", "4m"): 3,
+    }
+    try:
+        return ghost_cells[(spatial_order, advection)]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported swadvec={advection!r} with swspatialorder={spatial_order!r}."
+        ) from exc
+
+
+def configured_horizontal_ghost_cells(cfg: dict) -> int:
+    base_ini = resolve_path(cfg["case"].get("base_ini", "era5_openbc.ini.base"), cfg["_base_dir"])
+    ini = io.read_ini(str(base_ini))
+    spatial_order = ini["grid"]["swspatialorder"]
+    advection = ini.get("advec", {}).get("swadvec", spatial_order)
+    return horizontal_ghost_cells(spatial_order, advection)
+
+
 def build_domains(cfg: dict, grids: list[GridData]) -> list[Domain]:
+    validate_shared_vertical_grid(cfg)
     era5_cfg = cfg["era5"]
     run_cfg = run_settings(cfg)
     actual_bcs_frequency = int(run_cfg["bcs_frequency"])
     era5_lbc_frequency = int(float(era5_cfg.get("download_interval_hours", 1)) * 3600.0)
     domains = []
     base_work_dir = case_work_dir(cfg)
+    n_ghost = configured_horizontal_ghost_cells(cfg)
 
     for i, domain_cfg in enumerate(cfg["domains"]):
         default_lbc_frequency = era5_lbc_frequency if i == 0 else actual_bcs_frequency
+        if "n_ghost" in domain_cfg:
+            raise ValueError(
+                f"Remove domains[{i}].n_ghost; it is derived from swadvec in the base INI."
+            )
         kwargs = dict(
             xsize=float(domain_cfg["xsize"]),
             ysize=float(domain_cfg["ysize"]),
             itot=int(domain_cfg["itot"]),
             jtot=int(domain_cfg["jtot"]),
-            n_ghost=int(domain_cfg.get("n_ghost", 3)),
+            n_ghost=n_ghost,
             n_sponge=int(domain_cfg.get("n_sponge", 3)),
             lbc_freq=default_lbc_frequency,
             buffer_freq=default_lbc_frequency,
@@ -234,8 +364,7 @@ def build_domains(cfg: dict, grids: list[GridData]) -> list[Domain]:
         parent.child = child
         child.parent = parent
         child.grid_ratio_ij = integer_ratio(parent.dx, child.dx, "dx", child.name)
-        child.grid_ratio_k = vertical_grid_ratio(parent.grid, child.grid, child.name)
-        child.same_zsize_as_parent = bool(np.isclose(child.grid.zsize, parent.grid.zsize, rtol=1e-12, atol=1e-9))
+        child.grid_ratio_k = 1
 
     return domains
 
@@ -248,14 +377,6 @@ def integer_ratio(coarse: float, fine: float, name: str, domain_name: str) -> in
             f"{domain_name}: parent/child {name} ratio must be a positive integer; got {ratio}."
         )
     return rounded
-
-
-def vertical_grid_ratio(parent_grid: GridData, child_grid: GridData, domain_name: str) -> int:
-    if child_grid.zsize > parent_grid.zsize and not np.isclose(child_grid.zsize, parent_grid.zsize, rtol=1e-12, atol=1e-9):
-        raise ValueError(
-            f"{domain_name}: child zsize ({child_grid.zsize}) cannot exceed parent zsize ({parent_grid.zsize})."
-        )
-    return integer_ratio(parent_grid.dz0, child_grid.dz0, "dz", domain_name)
 
 
 def area_from_config(cfg: dict) -> list[float]:
@@ -934,9 +1055,6 @@ def configure_ini(cfg: dict, exp_dir: Path, domain: Domain, grid: GridData, era5
     ini["boundary_lateral"]["slist"] = lbc_scalar_list(cfg, domain.index)
 
     ini["buffer"]["loadfreq"] = int(domain.buffer_freq or domain.lbc_freq)
-    if domain.parent is not None and not getattr(domain, "same_zsize_as_parent", True):
-        ini["boundary_lateral"]["sw_wtop_2d"] = False
-
     configure_radiation_ini(cfg, ini)
     configure_subdomain_ini(cfg, ini, domain)
     apply_run_overrides(ini, run_cfg)
@@ -963,7 +1081,7 @@ def run_by_name(cfg: dict, run_name: str | None, domain_index: int = 0) -> dict 
         frequency = float(run_cfgs["warmup_frequency"])
         return {
             "starttime": 0.0,
-            "endtime": case_duration_seconds(cfg),
+            "endtime": (cfg["case"]["end"] - case_start).total_seconds(),
             "savetime": frequency,
             "datetime_utc": case_start,
             "_time_origin_offset": 0.0,
@@ -1007,10 +1125,6 @@ def run_by_name(cfg: dict, run_name: str | None, domain_index: int = 0) -> dict 
         }
 
     raise ValueError(f"Unknown run phase {run_name!r}.")
-
-
-def case_duration_seconds(cfg: dict) -> float:
-    return (cfg["case"]["end"] - cfg["case"]["start"]).total_seconds()
 
 
 def run_settings(cfg: dict) -> dict:
@@ -1178,11 +1292,11 @@ def configure_subdomain_ini(cfg: dict, ini: dict, domain: Domain):
     ini["subdomain"]["xend"] = child.xstart_in_parent + child.xsize
     ini["subdomain"]["yend"] = child.ystart_in_parent + child.ysize
     ini["subdomain"]["grid_ratio_ij"] = child.grid_ratio_ij
-    ini["subdomain"]["grid_ratio_k"] = child.grid_ratio_k
+    ini["subdomain"]["grid_ratio_k"] = 1
     ini["subdomain"]["n_ghost"] = child.n_ghost
     ini["subdomain"]["n_sponge"] = child.n_sponge
     ini["subdomain"]["savetime_bcs"] = child.lbc_freq
-    ini["subdomain"]["sw_save_wtop"] = bool(getattr(child, "same_zsize_as_parent", True))
+    ini["subdomain"]["sw_save_wtop"] = True
     ini["subdomain"]["sw_save_buffer"] = True
     ini["subdomain"]["savetime_buffer"] = child.buffer_freq or child.lbc_freq
     ini["subdomain"]["zstart_buffer"] = domain_buffer_zstart(cfg, child.index, child.grid)
@@ -1339,6 +1453,9 @@ def regrid_les_initial_state(
     path_in = Path(path_in)
     path_out = Path(path_out)
 
+    if not np.array_equal(z_in, z_out) or not np.array_equal(zh_in, zh_out):
+        raise ValueError("Parent and child must use the same vertical grid.")
+
     dx_in = xsize_in / itot_in
     dy_in = ysize_in / jtot_in
     x_in = np.arange(dx_in / 2.0, xsize_in, dx_in)
@@ -1358,9 +1475,8 @@ def regrid_les_initial_state(
         dim_x_out = xh_out if field == "u" else x_out
         dim_y_in = yh_in if field == "v" else y_in
         dim_y_out = yh_out if field == "v" else y_out
-        dim_z_in = zh_in[:-1] if field == "w" else z_in
-        dim_z_out = zh_out[:-1] if field == "w" else z_out
-        return dim_x_in, dim_x_out, dim_y_in, dim_y_out, dim_z_in, dim_z_out
+        dim_z = zh_in[:-1] if field == "w" else z_in
+        return dim_x_in, dim_x_out, dim_y_in, dim_y_out, dim_z
 
     def parse_times(times):
         if isinstance(times, int):
@@ -1368,26 +1484,25 @@ def regrid_les_initial_state(
         return list(times)
 
     for field, times in fields_3d.items():
-        dim_x_in, dim_x_out, dim_y_in, dim_y_out, dim_z_in, dim_z_out = dims(field)
+        dim_x_in, dim_x_out, dim_y_in, dim_y_out, dim_z = dims(field)
         for time in parse_times(times):
             data = np.fromfile(path_in / f"{field}.{time:07d}", dtype=float_type)
-            data = data.reshape((dim_z_in.size, jtot_in, itot_in))
+            data = data.reshape((dim_z.size, jtot_in, itot_in))
             da_in = xr.DataArray(
                 data,
-                coords={"z": dim_z_in, "y": dim_y_in, "x": dim_x_in},
+                coords={"z": dim_z, "y": dim_y_in, "x": dim_x_in},
                 dims=["z", "y", "x"],
             )
             da_out = da_in.interp(
                 x=dim_x_out,
                 y=dim_y_out,
-                z=dim_z_out,
                 method="linear",
                 kwargs={"fill_value": "extrapolate"},
             )
             da_out.values.astype(float_type).tofile(path_out / f"{field}{name_suffix}.{time + time_offset:07d}")
 
     for field, times in fields_2d.items():
-        dim_x_in, dim_x_out, dim_y_in, dim_y_out, _, _ = dims(field)
+        dim_x_in, dim_x_out, dim_y_in, dim_y_out, _ = dims(field)
         for time in parse_times(times):
             data = np.fromfile(path_in / f"{field}.{time:07d}", dtype=float_type)
             data = data.reshape((jtot_in, itot_in))
@@ -1496,6 +1611,66 @@ def initial_3d_fields(cfg: dict) -> list[str]:
     return ["u", "v", "w", "thl", "qt"]
 
 
+def link_file(source: Path, destination: Path):
+    if not source.is_file():
+        raise FileNotFoundError(f"Required warmup file is missing: {source}")
+    if destination.exists() or destination.is_symlink():
+        destination.unlink()
+    destination.symlink_to(source.resolve())
+
+
+def link_outer_run_inputs(cfg: dict, exp_dir: Path):
+    warmup_dir = run_dir(cfg, 0, "warmup")
+    case_name = microhh_name(cfg)
+    start, end = nesting_interval(cfg)
+    starttime = integer_seconds(seconds_since_case_start(cfg, start), "[run].start offset")
+    endtime = integer_seconds(seconds_since_case_start(cfg, end), "[run].end offset")
+
+    static_files = (
+        f"{case_name}_input.nc",
+        "grid.0000000",
+        "fftwplan.0000000",
+        "rhoref.0000000",
+    )
+    for name in static_files:
+        link_file(warmup_dir / name, exp_dir / name)
+
+    restart_fields = set(initial_3d_fields(cfg))
+    restart_fields.update({
+        "time", "thermo_basestate", "thl_bot", "qt_bot",
+        "dudz_mo", "dvdz_mo", "dbdz_mo", "obuk",
+    })
+    for field in sorted(restart_fields):
+        name = f"{field}.{starttime:07d}"
+        link_file(warmup_dir / name, exp_dir / name)
+
+    forcing_files: dict[str, dict[int, Path]] = defaultdict(dict)
+    forcing_pattern = re.compile(
+        r"^(?P<prefix>lbc_.+|w_top|.+_buffer|phydro_tod)\.(?P<time>\d{7})$"
+    )
+    for source in warmup_dir.iterdir():
+        match = forcing_pattern.match(source.name)
+        if match is None or match.group("prefix").endswith("_out"):
+            continue
+        forcing_files[match.group("prefix")][int(match.group("time"))] = source
+
+    if not forcing_files:
+        raise FileNotFoundError(f"No forcing files found in warmup directory {warmup_dir}.")
+
+    for prefix, sources in forcing_files.items():
+        before = [time for time in sources if time <= starttime]
+        after = [time for time in sources if time >= endtime]
+        if not before or not after:
+            raise FileNotFoundError(
+                f"Warmup forcing {prefix!r} does not bracket {starttime}..{endtime} s."
+            )
+        selected = {max(before), min(after)}
+        selected.update(time for time in sources if starttime < time < endtime)
+        for time in sorted(selected):
+            source = sources[time]
+            link_file(source, exp_dir / source.name)
+
+
 def link_parent_outputs(
         parent_exp_dir: Path,
         exp_dir: Path,
@@ -1567,11 +1742,14 @@ def prepare_exp_dir(path: Path):
 
 
 def generate_domain(cfg: dict, domain_index: int, download: bool = False, run_name: str | None = None):
+    float_type = float_type_from_config(cfg)
+    grid = make_grid(cfg, float_type)
+    print(f"Domain height: {grid.zsize:.6f} m ({grid.ktot} vertical levels)")
+
     if download or bool(cfg["era5"].get("download", False)):
         download_era5(cfg)
 
-    float_type = float_type_from_config(cfg)
-    grids = [make_grid(domain_cfg, float_type) for domain_cfg in cfg["domains"]]
+    grids = [grid] * len(cfg["domains"])
     domains = build_domains(cfg, grids)
 
     if domain_index < 0 or domain_index >= len(domains):
@@ -1583,12 +1761,18 @@ def generate_domain(cfg: dict, domain_index: int, download: bool = False, run_na
 
     domain = domains[domain_index]
     grid = grids[domain_index]
-    exp_dir = domain_dir(cfg, domain_index)
+    exp_dir = run_dir(cfg, domain_index, run_name)
     prepare_exp_dir(exp_dir)
     run_cfg = run_by_name(cfg, run_name, domain_index=domain_index)
 
-    write_case_input(cfg, exp_dir, grid, era5, float_type, run_cfg=run_cfg)
     configure_ini(cfg, exp_dir, domain, grid, era5, float_type, run_cfg=run_cfg)
+
+    if run_name == "run" and domain_index == 0:
+        link_outer_run_inputs(cfg, exp_dir)
+        copy_rrtmgp_coefficients(cfg, exp_dir)
+        return
+
+    write_case_input(cfg, exp_dir, grid, era5, float_type, run_cfg=run_cfg)
     bs = save_basestate(cfg, exp_dir, grid, era5, float_type)
     copy_rrtmgp_coefficients(cfg, exp_dir)
 
