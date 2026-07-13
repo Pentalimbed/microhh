@@ -2,3 +2,8 @@
 .code-workspace.code-workspace
 .gitignore
 .vscode
+
+default.cmake
+build/
+.vscode/
+__pycache__/
