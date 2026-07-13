@@ -554,7 +554,7 @@ void Model<TF>::exec()
                                 *thermo, *timeloop,
                                 itime, iotime);
 
-                        #pragma omp task default(shared)
+                        #pragma omp task default(shared) firstprivate(iter, time, itime, idt, iotime, dt)
                         calculate_statistics(iter, time, itime, idt, iotime, dt);
                     }
 
@@ -614,7 +614,7 @@ void Model<TF>::exec()
                         // leading to restart failures.
                         thermo->save(iotime);
 
-                        #pragma omp task default(shared)
+                        #pragma omp task default(shared) firstprivate(iotime, itime, idt, iteration)
                         {
                             timeloop->save(iotime, itime, idt, iteration);
                             fields  ->save(iotime);
