@@ -607,7 +607,7 @@ void Model<TF>::exec()
                         // leading to restart failures.
                         thermo->save(iotime);
 
-                        #pragma omp task default(shared)
+                        #pragma omp task default(shared) firstprivate(iotime, itime, idt, iteration)
                         {
                             timeloop->save(iotime, itime, idt, iteration);
                             fields  ->save(iotime);
