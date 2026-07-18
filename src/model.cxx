@@ -547,7 +547,7 @@ void Model<TF>::exec()
                                 *thermo, *timeloop,
                                 itime, iotime);
 
-                        #pragma omp task default(shared)
+                        #pragma omp task default(shared) firstprivate(iter, time, itime, idt, iotime, dt)
                         calculate_statistics(iter, time, itime, idt, iotime, dt);
                     }
 
