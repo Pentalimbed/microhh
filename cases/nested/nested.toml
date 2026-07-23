@@ -3,7 +3,7 @@ microhh_name = "cabauw"
 base_ini = "era5_openbc.ini.base"
 work_dir = "."
 start = "2016-08-15T06:00:00Z"
-end = "2016-08-15T18:00:00Z"
+end = "2016-08-15T11:00:00Z"
 float_type = "float32"
 swmicro = "nsw6"
 npx = 1
@@ -51,10 +51,10 @@ kngrid_k = 32
 
 [run]
 warmup_frequency = 1200
-start = "2016-08-15T08:00:00Z"
-end = "2016-08-15T08:30:00Z"
-bcs_frequency = 30
-dump_frequency = 300
+start = "2016-08-15T10:00:00Z"
+end = "2016-08-15T11:00:00Z"
+bcs_frequency = 60
+dump_frequency = 600
 
 [vertical_grid]
 # Options: "equidistant", "linear_stretched", "stretched".
@@ -63,8 +63,8 @@ ktot = 250
 dz0 = 10
 alpha = 0.012
 # For stretched, replace alpha with:
-nloc1 = 60
-nbuf1 = 20
+nloc1 = 200
+nbuf1 = 100
 dz1 = 120
 # Optional second transition: nloc2, nbuf2, dz2.
 
