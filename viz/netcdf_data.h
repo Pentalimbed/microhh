@@ -49,6 +49,9 @@ namespace microhh::viz
         float scalar_max = 0.f;
         float vector_min = 0.f;
         float vector_max = 0.f;
+        std::array<double, 3> domain_origin = {{0., 0., 0.}};
+        std::array<double, 3> domain_size = {{1., 1., 1.}};
+        std::array<double, 3> cell_size = {{1., 1., 1.}};
         double time = 0.;
         int time_index = 0;
     };
@@ -65,11 +68,14 @@ namespace microhh::viz
         fs::path ini_path;
         bool has_domain_size = false;
         bool has_grid_size = false;
-        bool has_cell_size = false;
         std::array<double, 3> domain_size = {{1., 1., 1.}};
         std::array<double, 3> grid_size = {{1., 1., 1.}};
-        std::array<double, 3> cell_size = {{1., 1., 1.}};
-        std::array<float, 3> display_scale = {{1.f, 1.f, 1.f}};
+    };
+
+    struct Output_grid
+    {
+        double top = 1.;
+        int vertical_cells = 1;
     };
 
     struct Axis_sample
@@ -187,13 +193,17 @@ namespace microhh::viz
             const std::vector<std::string>& scalar_names() const;
             bool has_velocity() const;
             bool has_cloud_velocity_fields() const;
+            Output_grid default_output_grid() const;
             int time_count(const std::string& scalar_name) const;
-            Vdb_export_summary export_cloud_velocity_vdb_sequence(const fs::path& directory) const;
+            Vdb_export_summary export_cloud_velocity_vdb_sequence(
+                    const fs::path& directory,
+                    const Output_grid& output_grid) const;
             Snapshot snapshot(
                     const std::string& scalar_name,
                     int time_index,
-                    int stride,
-                    bool include_velocity) const;
+                    int horizontal_stride,
+                    bool include_velocity,
+                    const Output_grid& output_grid) const;
 
         private:
             struct Impl;

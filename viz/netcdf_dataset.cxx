@@ -112,18 +112,21 @@ namespace
         }
     }
 
-    std::array<float, 3> normalized_display_scale(const std::array<double, 3>& size)
+    // Representative visible-light mass-extinction coefficients in m2/kg.
+    constexpr float cloud_water_extinction = 144.7f;
+    constexpr float cloud_ice_extinction = 65.f;
+    constexpr float rain_extinction = 3.f;
+    constexpr float snow_extinction = 15.f;
+    constexpr float graupel_extinction = 8.f;
+
+    float mass_extinction_coefficient(const std::string& name)
     {
-        const double max_size = std::max({size[0], size[1], size[2]});
-        std::array<float, 3> scale = {{1.f, 1.f, 1.f}};
-
-        for (std::size_t i=0; i<scale.size(); ++i)
-        {
-            if (size[i] > 0. && max_size > 0.)
-                scale[i] = static_cast<float>(std::clamp(size[i] / max_size, 0.01, 1000.));
-        }
-
-        return scale;
+        if (name == "ql") return cloud_water_extinction;
+        if (name == "qi") return cloud_ice_extinction;
+        if (name == "qr") return rain_extinction;
+        if (name == "qs") return snow_extinction;
+        if (name == "qg") return graupel_extinction;
+        return 1.f;
     }
 
     struct Field_file
@@ -340,41 +343,158 @@ namespace
         max_value = std::max(max_value, value);
     }
 
-    double average_axis_spacing(const std::vector<float>& axis)
-    {
-        if (axis.size() <= 1)
-            return 1.;
-
-        const double spacing =
-                static_cast<double>(axis.back() - axis.front()) /
-                static_cast<double>(axis.size() - 1);
-        return spacing != 0. ? spacing : 1.;
-    }
-
-    float linear_axis_value(const std::vector<float>& axis, const int index)
+    std::array<double, 2> inferred_axis_bounds(const std::vector<float>& axis)
     {
         if (axis.empty())
-            return static_cast<float>(index);
-        if (axis.size() <= 1)
-            return axis.front();
+            return {{0., 1.}};
+        if (axis.size() == 1)
+            return {{static_cast<double>(axis.front()) - 0.5,
+                     static_cast<double>(axis.front()) + 0.5}};
 
-        return axis.front()
-                + static_cast<float>(index) *
-                (axis.back() - axis.front()) / static_cast<float>(axis.size() - 1);
+        return {{
+            static_cast<double>(axis.front()) - 0.5*static_cast<double>(axis[1] - axis[0]),
+            static_cast<double>(axis.back()) + 0.5*static_cast<double>(axis.back() - axis[axis.size()-2])}};
     }
 
-    bool axis_is_regular_for_export(const std::vector<float>& axis)
+    struct Cubic_axis_sample
     {
-        if (axis.size() <= 2)
-            return true;
+        std::array<int, 4> index = {{0, 0, 0, 0}};
+        std::array<float, 4> weight = {{1.f, 0.f, 0.f, 0.f}};
+        bool inside = true;
+    };
 
-        const double reference = average_axis_spacing(axis);
-        const double tolerance = std::max(1.e-5, std::abs(reference) * 1.e-4);
-        for (std::size_t i=1; i<axis.size(); ++i)
-            if (std::abs(static_cast<double>(axis[i] - axis[i-1]) - reference) > tolerance)
-                return false;
+    Cubic_axis_sample locate_cubic_axis_sample(
+            const std::vector<float>& axis,
+            const float value)
+    {
+        Cubic_axis_sample sample;
+        if (axis.empty())
+        {
+            sample.inside = false;
+            return sample;
+        }
+        if (axis.size() == 1)
+            return sample;
 
-        return true;
+        const auto bounds = inferred_axis_bounds(axis);
+        const double bound_min = std::min(bounds[0], bounds[1]);
+        const double bound_max = std::max(bounds[0], bounds[1]);
+        sample.inside = value >= bound_min && value <= bound_max;
+
+        const double equality_tolerance = std::max(1.e-6, (bound_max-bound_min)*1.e-7);
+        const auto nearest = std::lower_bound(axis.begin(), axis.end(), value);
+        if (axis.front() <= axis.back() && nearest != axis.end())
+        {
+            const int index = static_cast<int>(std::distance(axis.begin(), nearest));
+            if (std::abs(static_cast<double>(*nearest)-value) <= equality_tolerance)
+            {
+                sample.index = {{index, index, index, index}};
+                return sample;
+            }
+        }
+
+        const bool ascending = axis.front() < axis.back();
+        int hi = 1;
+        if (ascending)
+        {
+            const auto it = std::upper_bound(axis.begin(), axis.end(), value);
+            hi = std::clamp(static_cast<int>(std::distance(axis.begin(), it)), 1,
+                    static_cast<int>(axis.size()) - 1);
+        }
+        else
+        {
+            const auto it = std::upper_bound(axis.begin(), axis.end(), value, std::greater<float>());
+            hi = std::clamp(static_cast<int>(std::distance(axis.begin(), it)), 1,
+                    static_cast<int>(axis.size()) - 1);
+        }
+
+        const int first = std::clamp(hi - 2, 0, std::max(0, static_cast<int>(axis.size()) - 4));
+        for (int n=0; n<4; ++n)
+            sample.index[static_cast<std::size_t>(n)] = std::min(first + n, static_cast<int>(axis.size()) - 1);
+
+        if (axis.size() < 4)
+        {
+            const auto linear = locate_axis_sample(axis, value);
+            sample.index = {{linear.lo, linear.hi, linear.hi, linear.hi}};
+            sample.weight = {{1.f-linear.weight, linear.weight, 0.f, 0.f}};
+            return sample;
+        }
+
+        for (int n=0; n<4; ++n)
+        {
+            double weight = 1.;
+            const double xn = axis[static_cast<std::size_t>(sample.index[static_cast<std::size_t>(n)])];
+            for (int m=0; m<4; ++m)
+            {
+                if (m == n)
+                    continue;
+                const double xm = axis[static_cast<std::size_t>(sample.index[static_cast<std::size_t>(m)])];
+                const double denominator = xn - xm;
+                if (denominator == 0.)
+                {
+                    weight = 0.;
+                    break;
+                }
+                weight *= (static_cast<double>(value) - xm) / denominator;
+            }
+            sample.weight[static_cast<std::size_t>(n)] = static_cast<float>(weight);
+        }
+        return sample;
+    }
+
+    float sample_component_cubic(
+            const std::vector<float>& values,
+            const int nx,
+            const int ny,
+            const Cubic_axis_sample& x,
+            const Cubic_axis_sample& y,
+            const Cubic_axis_sample& z,
+            const bool zero_outside)
+    {
+        if (zero_outside && (!x.inside || !y.inside || !z.inside))
+            return 0.f;
+
+        double result = 0.;
+        for (int kk=0; kk<4; ++kk)
+        {
+            const double wz = z.weight[static_cast<std::size_t>(kk)];
+            if (wz == 0.)
+                continue;
+            for (int jj=0; jj<4; ++jj)
+            {
+                const double wy = y.weight[static_cast<std::size_t>(jj)];
+                if (wy == 0.)
+                    continue;
+                for (int ii=0; ii<4; ++ii)
+                {
+                    const double wx = x.weight[static_cast<std::size_t>(ii)];
+                    if (wx == 0.)
+                        continue;
+                    result += wx * wy * wz
+                            * values[point_id(
+                                    nx, ny,
+                                    x.index[static_cast<std::size_t>(ii)],
+                                    y.index[static_cast<std::size_t>(jj)],
+                                    z.index[static_cast<std::size_t>(kk)])];
+                }
+            }
+        }
+        return static_cast<float>(result);
+    }
+
+    std::vector<float> uniform_cell_centers(
+            const double lower,
+            const double upper,
+            const int count)
+    {
+        if (!(upper > lower) || count <= 0)
+            throw std::runtime_error("Output grid bounds and cell counts must be positive");
+
+        const double spacing = (upper - lower) / static_cast<double>(count);
+        std::vector<float> axis(static_cast<std::size_t>(count));
+        for (int i=0; i<count; ++i)
+            axis[static_cast<std::size_t>(i)] = static_cast<float>(lower + (static_cast<double>(i) + 0.5)*spacing);
+        return axis;
     }
 
     bool axes_match_for_combination(
@@ -392,25 +512,6 @@ namespace
         }
 
         return true;
-    }
-
-    std::vector<float> export_axis_values(
-            const std::vector<float>& source_axis,
-            const int count,
-            const bool resampled_to_uniform)
-    {
-        std::vector<float> values;
-        values.reserve(static_cast<std::size_t>(count));
-        for (int i=0; i<count; ++i)
-        {
-            if (resampled_to_uniform)
-                values.push_back(linear_axis_value(source_axis, i));
-            else if (!source_axis.empty())
-                values.push_back(source_axis[static_cast<std::size_t>(i)]);
-            else
-                values.push_back(static_cast<float>(i));
-        }
-        return values;
     }
 
     openvdb::FloatGrid::Ptr make_float_grid(
@@ -537,15 +638,6 @@ Case_settings read_case_settings(const fs::path& directory)
 
     settings.has_domain_size = have_x && have_y && have_z;
     settings.has_grid_size = have_itot && have_jtot && have_ktot;
-    settings.has_cell_size = settings.has_domain_size && settings.has_grid_size;
-    if (settings.has_cell_size)
-    {
-        for (std::size_t i=0; i<settings.cell_size.size(); ++i)
-            settings.cell_size[i] = settings.domain_size[i] / settings.grid_size[i];
-        settings.display_scale = normalized_display_scale(settings.cell_size);
-    }
-    else if (settings.has_domain_size)
-        settings.display_scale = normalized_display_scale(settings.domain_size);
 
     return settings;
 }
@@ -575,11 +667,26 @@ Dataset::Dataset(const std::vector<fs::path>& paths)
         }
     }
 
-    std::sort(impl_->scalar_names.begin(), impl_->scalar_names.end());
+    const std::array<std::string, 5> hydrometeors = {{"ql", "qi", "qr", "qs", "qg"}};
+    impl_->scalar_names.erase(
+            std::remove_if(
+                impl_->scalar_names.begin(), impl_->scalar_names.end(),
+                [&](const std::string& name)
+                {
+                    return std::find(hydrometeors.begin(), hydrometeors.end(), name) == hydrometeors.end();
+                }),
+            impl_->scalar_names.end());
+    std::sort(
+            impl_->scalar_names.begin(), impl_->scalar_names.end(),
+            [&](const std::string& a, const std::string& b)
+            {
+                return std::find(hydrometeors.begin(), hydrometeors.end(), a)
+                        < std::find(hydrometeors.begin(), hydrometeors.end(), b);
+            });
     if (impl_->scalars.count("ql") && impl_->scalars.count("qi"))
         impl_->scalar_names.push_back("ql+qi");
     if (impl_->scalar_names.empty())
-        throw std::runtime_error("No scalar NetCDF dumps were loaded. Expected files such as ql.nc or qi.nc.");
+        throw std::runtime_error("No supported hydrometeor fields were loaded. Expected ql, qi, qr, qs, or qg.");
 }
 
 Dataset::~Dataset() = default;
@@ -607,6 +714,16 @@ bool Dataset::has_cloud_velocity_fields() const
             && impl_->velocity.count("w");
 }
 
+Output_grid Dataset::default_output_grid() const
+{
+    if (impl_->scalars.empty())
+        return {};
+
+    const auto& field = impl_->scalars.begin()->second;
+    const auto bounds = inferred_axis_bounds(field.z);
+    return {std::max(bounds[0], bounds[1]), static_cast<int>(field.nz())};
+}
+
 int Dataset::time_count(const std::string& scalar_name) const
 {
     if (scalar_name == "ql+qi")
@@ -614,7 +731,9 @@ int Dataset::time_count(const std::string& scalar_name) const
     return static_cast<int>(impl_->scalars.at(scalar_name).nt());
 }
 
-Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(const fs::path& directory) const
+Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(
+        const fs::path& directory,
+        const Output_grid& output_grid) const
 {
     if (!has_cloud_velocity_fields())
         throw std::runtime_error("VDB export requires ql.nc, qi.nc, u.nc, v.nc, and w.nc");
@@ -635,39 +754,35 @@ Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(const fs::path& d
     struct Velocity_export_sampler
     {
         const Field_file* field = nullptr;
-        std::vector<Axis_sample> x;
-        std::vector<Axis_sample> y;
-        std::vector<Axis_sample> z;
+        std::vector<Cubic_axis_sample> x;
+        std::vector<Cubic_axis_sample> y;
+        std::vector<Cubic_axis_sample> z;
     };
 
     fs::create_directories(directory);
 
     const int nx = static_cast<int>(ql.nx());
     const int ny = static_cast<int>(ql.ny());
-    const int nz = static_cast<int>(ql.nz());
-    const bool resample_to_uniform = !axis_is_regular_for_export(ql.x)
-            || !axis_is_regular_for_export(ql.y)
-            || !axis_is_regular_for_export(ql.z);
+    const int nz = output_grid.vertical_cells;
+    const auto x_bounds = inferred_axis_bounds(ql.x);
+    const auto y_bounds = inferred_axis_bounds(ql.y);
+    const double x_min = std::min(x_bounds[0], x_bounds[1]);
+    const double x_max = std::max(x_bounds[0], x_bounds[1]);
+    const double y_min = std::min(y_bounds[0], y_bounds[1]);
+    const double y_max = std::max(y_bounds[0], y_bounds[1]);
+    const double z_bottom = 0.;
+    if (!(output_grid.top > z_bottom) || nz <= 0)
+        throw std::runtime_error("Output top must exceed the input bottom and vertical cells must be positive");
 
-    std::vector<Axis_sample> x_samples;
-    std::vector<Axis_sample> y_samples;
-    std::vector<Axis_sample> z_samples;
-    if (resample_to_uniform)
-    {
-        x_samples.reserve(ql.x.size());
-        y_samples.reserve(ql.y.size());
-        z_samples.reserve(ql.z.size());
-        for (int i=0; i<nx; ++i)
-            x_samples.push_back(locate_axis_sample(ql.x, linear_axis_value(ql.x, i)));
-        for (int j=0; j<ny; ++j)
-            y_samples.push_back(locate_axis_sample(ql.y, linear_axis_value(ql.y, j)));
-        for (int k=0; k<nz; ++k)
-            z_samples.push_back(locate_axis_sample(ql.z, linear_axis_value(ql.z, k)));
-    }
-
-    const auto export_x = export_axis_values(ql.x, nx, resample_to_uniform);
-    const auto export_y = export_axis_values(ql.y, ny, resample_to_uniform);
-    const auto export_z = export_axis_values(ql.z, nz, resample_to_uniform);
+    const auto export_x = uniform_cell_centers(x_min, x_max, nx);
+    const auto export_y = uniform_cell_centers(y_min, y_max, ny);
+    const auto export_z = uniform_cell_centers(z_bottom, output_grid.top, nz);
+    std::vector<Cubic_axis_sample> x_samples;
+    std::vector<Cubic_axis_sample> y_samples;
+    std::vector<Cubic_axis_sample> z_samples;
+    for (const float value : export_x) x_samples.push_back(locate_cubic_axis_sample(ql.x, value));
+    for (const float value : export_y) y_samples.push_back(locate_cubic_axis_sample(ql.y, value));
+    for (const float value : export_z) z_samples.push_back(locate_cubic_axis_sample(ql.z, value));
 
     std::map<std::string, Velocity_export_sampler> velocity_samplers;
     for (const auto& name : {"u", "v", "w"})
@@ -677,14 +792,16 @@ Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(const fs::path& d
                 name,
                 Velocity_export_sampler{
                     &field,
-                    map_axis_samples(export_x, field.x),
-                    map_axis_samples(export_y, field.y),
-                    map_axis_samples(export_z, field.z)});
+                    {}, {}, {}});
+        auto& sampler = velocity_samplers.at(name);
+        for (const float value : export_x) sampler.x.push_back(locate_cubic_axis_sample(field.x, value));
+        for (const float value : export_y) sampler.y.push_back(locate_cubic_axis_sample(field.y, value));
+        for (const float value : export_z) sampler.z.push_back(locate_cubic_axis_sample(field.z, value));
     }
 
     Vdb_export_summary summary;
     summary.frames = frame_count;
-    summary.resampled = resample_to_uniform;
+    summary.resampled = true;
 
     for (std::size_t frame=0; frame<frame_count; ++frame)
     {
@@ -705,30 +822,43 @@ Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(const fs::path& d
         }
 
         auto transform = openvdb::math::Transform::createLinearTransform(1.);
+        const std::array<double, 3> domain_size = {{x_max-x_min, y_max-y_min, output_grid.top-z_bottom}};
+        const std::array<double, 3> spacing = {{domain_size[0]/nx, domain_size[1]/ny, domain_size[2]/nz}};
         transform->postScale(openvdb::math::Vec3d(
-                    average_axis_spacing(ql.x),
-                    average_axis_spacing(ql.y),
-                    average_axis_spacing(ql.z)));
+                    spacing[0], spacing[1], spacing[2]));
         transform->postTranslate(openvdb::math::Vec3d(
-                    ql.x.empty() ? 0. : ql.x.front(),
-                    ql.y.empty() ? 0. : ql.y.front(),
-                    ql.z.empty() ? 0. : ql.z.front()));
+                    -0.5*domain_size[0] + 0.5*spacing[0],
+                    -0.5*domain_size[1] + 0.5*spacing[1],
+                    z_bottom + 0.5*spacing[2]));
 
         auto ql_grid = make_float_grid(
                 "ql", "ql", transform, ql.time_value(frame), frame,
-                resample_to_uniform, openvdb::GRID_FOG_VOLUME);
+                true, openvdb::GRID_FOG_VOLUME);
         auto qi_grid = make_float_grid(
                 "qi", "qi", transform, ql.time_value(frame), frame,
-                resample_to_uniform, openvdb::GRID_FOG_VOLUME);
+                true, openvdb::GRID_FOG_VOLUME);
         auto u_grid = make_float_grid(
                 "u", "u", transform, ql.time_value(frame), frame,
-                resample_to_uniform, openvdb::GRID_UNKNOWN);
+                true, openvdb::GRID_UNKNOWN);
         auto v_grid = make_float_grid(
                 "v", "v", transform, ql.time_value(frame), frame,
-                resample_to_uniform, openvdb::GRID_UNKNOWN);
+                true, openvdb::GRID_UNKNOWN);
         auto w_grid = make_float_grid(
                 "w", "w", transform, ql.time_value(frame), frame,
-                resample_to_uniform, openvdb::GRID_UNKNOWN);
+                true, openvdb::GRID_UNKNOWN);
+
+        const openvdb::Vec3d domain_origin(
+                -0.5*domain_size[0], -0.5*domain_size[1], z_bottom);
+        const openvdb::Vec3d output_size(domain_size[0], domain_size[1], domain_size[2]);
+        const openvdb::Vec3d voxel_size(spacing[0], spacing[1], spacing[2]);
+        for (auto& grid : {ql_grid, qi_grid, u_grid, v_grid, w_grid})
+        {
+            grid->insertMeta("microhh_domain_origin_m", openvdb::Vec3DMetadata(domain_origin));
+            grid->insertMeta("microhh_domain_size_m", openvdb::Vec3DMetadata(output_size));
+            grid->insertMeta("microhh_voxel_size_m", openvdb::Vec3DMetadata(voxel_size));
+            grid->insertMeta("microhh_domain_placement", openvdb::StringMetadata(
+                        "origin is centered laterally on the bottom domain face; transform maps ijk to cell centers"));
+        }
 
         auto ql_accessor = ql_grid->getAccessor();
         auto qi_accessor = qi_grid->getAccessor();
@@ -739,25 +869,23 @@ Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(const fs::path& d
 
         const auto sample_scalar = [&](const std::vector<float>& values, const int i, const int j, const int k)
         {
-            if (resample_to_uniform)
-                return sample_component(
-                        values, nx, ny,
-                        x_samples[static_cast<std::size_t>(i)],
-                        y_samples[static_cast<std::size_t>(j)],
-                        z_samples[static_cast<std::size_t>(k)]);
-            return values[point_id(nx, ny, i, j, k)];
+            return std::max(0.f, sample_component_cubic(
+                    values, nx, ny,
+                    x_samples[static_cast<std::size_t>(i)],
+                    y_samples[static_cast<std::size_t>(j)],
+                    z_samples[static_cast<std::size_t>(k)], true));
         };
 
         const auto sample_velocity = [&](const std::string& name, const int i, const int j, const int k)
         {
             const auto& sampler = velocity_samplers.at(name);
-            return sample_component(
+            return sample_component_cubic(
                     velocity_values.at(name),
                     static_cast<int>(sampler.field->nx()),
                     static_cast<int>(sampler.field->ny()),
                     sampler.x[static_cast<std::size_t>(i)],
                     sampler.y[static_cast<std::size_t>(j)],
-                    sampler.z[static_cast<std::size_t>(k)]);
+                    sampler.z[static_cast<std::size_t>(k)], true);
         };
 
         for (int k=0; k<nz; ++k)
@@ -811,34 +939,57 @@ Vdb_export_summary Dataset::export_cloud_velocity_vdb_sequence(const fs::path& d
 Snapshot Dataset::snapshot(
         const std::string& scalar_name,
         const int time_index,
-        const int stride,
-        const bool include_velocity) const
+        const int horizontal_stride,
+        const bool include_velocity,
+        const Output_grid& output_grid) const
 {
     const bool combined_scalar = scalar_name == "ql+qi";
     const auto& scalar = combined_scalar ? impl_->scalars.at("ql") : impl_->scalars.at(scalar_name);
     const int source_nx = static_cast<int>(scalar.nx());
     const int source_ny = static_cast<int>(scalar.ny());
-    const int source_nz = static_cast<int>(scalar.nz());
-    const int s = std::max(1, stride);
+    const int s = std::max(1, horizontal_stride);
+    const auto x_bounds = inferred_axis_bounds(scalar.x);
+    const auto y_bounds = inferred_axis_bounds(scalar.y);
+    const double x_min = std::min(x_bounds[0], x_bounds[1]);
+    const double x_max = std::max(x_bounds[0], x_bounds[1]);
+    const double y_min = std::min(y_bounds[0], y_bounds[1]);
+    const double y_max = std::max(y_bounds[0], y_bounds[1]);
+    const double z_bottom = 0.;
+    const double z_top = output_grid.top;
+    if (!(z_top > z_bottom) || output_grid.vertical_cells <= 0)
+        throw std::runtime_error("Output top must exceed the input bottom and vertical cells must be positive");
 
     Snapshot snapshot;
     snapshot.nx = (source_nx + s - 1) / s;
     snapshot.ny = (source_ny + s - 1) / s;
-    snapshot.nz = (source_nz + s - 1) / s;
-    snapshot.x.resize(static_cast<std::size_t>(snapshot.nx));
-    snapshot.y.resize(static_cast<std::size_t>(snapshot.ny));
-    snapshot.z.resize(static_cast<std::size_t>(snapshot.nz));
+    snapshot.nz = output_grid.vertical_cells;
+    const auto source_x = uniform_cell_centers(x_min, x_max, snapshot.nx);
+    const auto source_y = uniform_cell_centers(y_min, y_max, snapshot.ny);
+    snapshot.z = uniform_cell_centers(z_bottom, z_top, snapshot.nz);
+    snapshot.domain_size = {{x_max-x_min, y_max-y_min, z_top-z_bottom}};
+    snapshot.domain_origin = {{-0.5*snapshot.domain_size[0], -0.5*snapshot.domain_size[1], z_bottom}};
+    snapshot.cell_size = {{
+        snapshot.domain_size[0] / snapshot.nx,
+        snapshot.domain_size[1] / snapshot.ny,
+        snapshot.domain_size[2] / snapshot.nz}};
+    snapshot.x = uniform_cell_centers(
+            snapshot.domain_origin[0], snapshot.domain_origin[0] + snapshot.domain_size[0], snapshot.nx);
+    snapshot.y = uniform_cell_centers(
+            snapshot.domain_origin[1], snapshot.domain_origin[1] + snapshot.domain_size[1], snapshot.ny);
     snapshot.time_index = std::clamp(time_index, 0, static_cast<int>(scalar.nt()) - 1);
     snapshot.time = scalar.time_value(static_cast<std::size_t>(snapshot.time_index));
 
     auto scalar_values = scalar.read_time_slice(static_cast<std::size_t>(snapshot.time_index));
+    std::vector<float> ice_values;
     if (combined_scalar)
     {
-        const auto qi_values = impl_->scalars.at("qi").read_time_slice(static_cast<std::size_t>(snapshot.time_index));
-        if (qi_values.size() != scalar_values.size())
-            throw std::runtime_error("ql+qi requires ql and qi to have identical dimensions");
-        for (std::size_t id=0; id<scalar_values.size(); ++id)
-            scalar_values[id] += qi_values[id];
+        const auto& ice = impl_->scalars.at("qi");
+        if (scalar.nx() != ice.nx() || scalar.ny() != ice.ny() || scalar.nz() != ice.nz()
+                || !axes_match_for_combination(scalar.x, ice.x)
+                || !axes_match_for_combination(scalar.y, ice.y)
+                || !axes_match_for_combination(scalar.z, ice.z))
+            throw std::runtime_error("ql+qi requires matching dimensions and coordinate axes");
+        ice_values = ice.read_time_slice(static_cast<std::size_t>(snapshot.time_index));
     }
 
     std::map<std::string, std::vector<float>> velocity_values;
@@ -858,23 +1009,23 @@ Snapshot Dataset::snapshot(
     snapshot.vector_min = std::numeric_limits<float>::max();
     snapshot.vector_max = -std::numeric_limits<float>::max();
 
-    for (int i=0; i<snapshot.nx; ++i)
-        snapshot.x[static_cast<std::size_t>(i)] =
-            scalar.x[static_cast<std::size_t>(std::min(i*s, source_nx - 1))];
-    for (int j=0; j<snapshot.ny; ++j)
-        snapshot.y[static_cast<std::size_t>(j)] =
-            scalar.y[static_cast<std::size_t>(std::min(j*s, source_ny - 1))];
-    for (int k=0; k<snapshot.nz; ++k)
-        snapshot.z[static_cast<std::size_t>(k)] =
-            scalar.z[static_cast<std::size_t>(std::min(k*s, source_nz - 1))];
+    std::vector<Cubic_axis_sample> scalar_x_samples;
+    std::vector<Cubic_axis_sample> scalar_y_samples;
+    std::vector<Cubic_axis_sample> scalar_z_samples;
+    for (const float value : source_x)
+        scalar_x_samples.push_back(locate_cubic_axis_sample(scalar.x, value));
+    for (const float value : source_y)
+        scalar_y_samples.push_back(locate_cubic_axis_sample(scalar.y, value));
+    for (const float value : snapshot.z)
+        scalar_z_samples.push_back(locate_cubic_axis_sample(scalar.z, value));
 
     struct Velocity_sampler
     {
         const Field_file* field = nullptr;
         const std::vector<float>* values = nullptr;
-        std::vector<Axis_sample> x;
-        std::vector<Axis_sample> y;
-        std::vector<Axis_sample> z;
+        std::vector<Cubic_axis_sample> x;
+        std::vector<Cubic_axis_sample> y;
+        std::vector<Cubic_axis_sample> z;
     };
 
     std::map<std::string, Velocity_sampler> velocity_samplers;
@@ -886,25 +1037,37 @@ Snapshot Dataset::snapshot(
                 Velocity_sampler{
                     &field,
                     &values,
-                    map_axis_samples(snapshot.x, field.x),
-                    map_axis_samples(snapshot.y, field.y),
-                    map_axis_samples(snapshot.z, field.z)});
+                    {}, {}, {}});
+        auto& sampler = velocity_samplers.at(name);
+        for (const float value : source_x)
+            sampler.x.push_back(locate_cubic_axis_sample(field.x, value));
+        for (const float value : source_y)
+            sampler.y.push_back(locate_cubic_axis_sample(field.y, value));
+        for (const float value : snapshot.z)
+            sampler.z.push_back(locate_cubic_axis_sample(field.z, value));
     }
 
     for (int k=0; k<snapshot.nz; ++k)
         for (int j=0; j<snapshot.ny; ++j)
             for (int i=0; i<snapshot.nx; ++i)
             {
-                const int source_i = std::min(i*s, source_nx - 1);
-                const int source_j = std::min(j*s, source_ny - 1);
-                const int source_k = std::min(k*s, source_nz - 1);
                 const auto id = point_id(snapshot.nx, snapshot.ny, i, j, k);
-                const auto source_id = point_id(source_nx, source_ny, source_i, source_j, source_k);
 
                 snapshot.points[3*id] = snapshot.x[static_cast<std::size_t>(i)];
                 snapshot.points[3*id + 1] = snapshot.y[static_cast<std::size_t>(j)];
                 snapshot.points[3*id + 2] = snapshot.z[static_cast<std::size_t>(k)];
-                snapshot.scalars[id] = scalar_values[source_id];
+                float extinction = mass_extinction_coefficient(scalar.name) * sample_component_cubic(
+                        scalar_values, source_nx, source_ny,
+                        scalar_x_samples[static_cast<std::size_t>(i)],
+                        scalar_y_samples[static_cast<std::size_t>(j)],
+                        scalar_z_samples[static_cast<std::size_t>(k)], true);
+                if (combined_scalar)
+                    extinction += cloud_ice_extinction * sample_component_cubic(
+                            ice_values, source_nx, source_ny,
+                            scalar_x_samples[static_cast<std::size_t>(i)],
+                            scalar_y_samples[static_cast<std::size_t>(j)],
+                            scalar_z_samples[static_cast<std::size_t>(k)], true);
+                snapshot.scalars[id] = extinction > 1.e-12f ? extinction : 0.f;
                 update_minmax(snapshot.scalars[id], snapshot.scalar_min, snapshot.scalar_max);
 
                 if (!snapshot.vectors.empty())
@@ -914,29 +1077,29 @@ Snapshot Dataset::snapshot(
                     float w = 0.f;
 
                     if (const auto it = velocity_samplers.find("u"); it != velocity_samplers.end())
-                        u = sample_component(
+                        u = sample_component_cubic(
                                 *it->second.values,
                                 static_cast<int>(it->second.field->nx()),
                                 static_cast<int>(it->second.field->ny()),
                                 it->second.x[static_cast<std::size_t>(i)],
                                 it->second.y[static_cast<std::size_t>(j)],
-                                it->second.z[static_cast<std::size_t>(k)]);
+                                it->second.z[static_cast<std::size_t>(k)], true);
                     if (const auto it = velocity_samplers.find("v"); it != velocity_samplers.end())
-                        v = sample_component(
+                        v = sample_component_cubic(
                                 *it->second.values,
                                 static_cast<int>(it->second.field->nx()),
                                 static_cast<int>(it->second.field->ny()),
                                 it->second.x[static_cast<std::size_t>(i)],
                                 it->second.y[static_cast<std::size_t>(j)],
-                                it->second.z[static_cast<std::size_t>(k)]);
+                                it->second.z[static_cast<std::size_t>(k)], true);
                     if (const auto it = velocity_samplers.find("w"); it != velocity_samplers.end())
-                        w = sample_component(
+                        w = sample_component_cubic(
                                 *it->second.values,
                                 static_cast<int>(it->second.field->nx()),
                                 static_cast<int>(it->second.field->ny()),
                                 it->second.x[static_cast<std::size_t>(i)],
                                 it->second.y[static_cast<std::size_t>(j)],
-                                it->second.z[static_cast<std::size_t>(k)]);
+                                it->second.z[static_cast<std::size_t>(k)], true);
 
                     snapshot.vectors[3*id] = u;
                     snapshot.vectors[3*id + 1] = v;
@@ -978,7 +1141,7 @@ std::vector<fs::path> discover_paths(const std::vector<std::string>& args)
 
     if (!directory.empty())
     {
-        for (const char* name : {"ql.nc", "qi.nc", "u.nc", "v.nc", "w.nc"})
+        for (const char* name : {"ql.nc", "qi.nc", "qr.nc", "qs.nc", "qg.nc", "u.nc", "v.nc", "w.nc"})
         {
             auto path = directory / name;
             if (fs::exists(path))
@@ -987,7 +1150,7 @@ std::vector<fs::path> discover_paths(const std::vector<std::string>& args)
     }
 
     if (paths.empty())
-        throw std::runtime_error("No NetCDF files found. Pass a directory containing ql.nc/qi.nc/u.nc/v.nc/w.nc or explicit .nc paths.");
+        throw std::runtime_error("No NetCDF files found. Pass a directory containing hydrometeor .nc files or explicit .nc paths.");
 
     return paths;
 }

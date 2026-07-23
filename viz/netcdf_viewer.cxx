@@ -48,6 +48,7 @@
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkGlyph3DMapper.h>
 #include <vtkImageData.h>
+#include <vtkLight.h>
 #include <vtkLookupTable.h>
 #include <vtkNew.h>
 #include <vtkOpenGLFramebufferObject.h>
@@ -107,7 +108,7 @@ struct Viz_state
     vtkSmartPointer<vtkVolumeProperty> volume_property;
     vtkSmartPointer<vtkColorTransferFunction> volume_color;
     vtkSmartPointer<vtkPiecewiseFunction> volume_opacity;
-    vtkSmartPointer<vtkLookupTable> scalar_lut;
+    vtkSmartPointer<vtkLight> sun_light;
     vtkSmartPointer<vtkLookupTable> vector_lut;
     vtkSmartPointer<vtkCallbackCommand> make_current_callback;
     vtkSmartPointer<vtkCallbackCommand> is_current_callback;
@@ -128,17 +129,22 @@ struct Viz_state
     int streamline_stride = 10;
     bool playing = false;
     bool needs_dataset_update = true;
+    bool gui_input_active = false;
     bool reset_camera = true;
-    bool volume_resampled = false;
     float glyph_scale = 5.f;
-    float volume_opacity_scale = 1.f;
     float playback_rate = 8.f;
-    std::array<float, 3> display_scale = {{1.f, 1.f, 1.f}};
+    float scattering_blending = 1.f;
+    float shadow_reach = 0.5f;
+    Output_grid output_grid;
+    float output_top_input = 1.f;
+    int vertical_cells_input = 1;
     fs::path export_directory;
     std::string export_message;
     bool export_failed = false;
 
     std::array<int, 3> dims = {{1, 1, 1}};
+    std::array<double, 3> domain_origin = {{0., 0., 0.}};
+    std::array<double, 3> domain_size = {{1., 1., 1.}};
     float scalar_min = 0.f;
     float scalar_max = 0.f;
     float vector_min = 0.f;
@@ -296,38 +302,29 @@ void update_visibility(Viz_state& state)
             state.show_vectors && vector_mode == Vector_mode::Streamlines && has_velocity ? 1 : 0);
 }
 
-void update_actor_scale(Viz_state& state)
-{
-    const double xscale = std::max(0.01f, state.display_scale[0]);
-    const double yscale = std::max(0.01f, state.display_scale[1]);
-    const double zscale = std::max(0.01f, state.display_scale[2]);
-    state.outline_actor->SetScale(xscale, yscale, zscale);
-    state.vector_actor->SetScale(xscale, yscale, zscale);
-    state.stream_actor->SetScale(xscale, yscale, zscale);
-    state.volume_actor->SetScale(xscale, yscale, zscale);
-}
-
 void update_volume_transfer(Viz_state& state)
 {
-    const double min_value = state.scalar_min;
-    const double max_value = state.scalar_min == state.scalar_max
-            ? state.scalar_max + 1.
-            : state.scalar_max;
-    const double mid_value = 0.5*(min_value + max_value);
-    const double high_value = min_value + 0.82*(max_value - min_value);
-    const double opacity_scale = std::clamp(static_cast<double>(state.volume_opacity_scale), 0., 10.);
+    const double max_value = std::max(1.e-12, static_cast<double>(state.scalar_max));
 
     state.volume_color->RemoveAllPoints();
-    state.volume_color->AddRGBPoint(min_value, 0.00, 0.00, 0.00);
-    state.volume_color->AddRGBPoint(mid_value, 0.43, 0.48, 0.53);
-    state.volume_color->AddRGBPoint(high_value, 0.78, 0.82, 0.84);
-    state.volume_color->AddRGBPoint(max_value, 1.00, 1.00, 0.96);
+    state.volume_color->AddRGBPoint(0., 0.86, 0.89, 0.92);
+    state.volume_color->AddRGBPoint(max_value, 1.00, 1.00, 0.98);
 
     state.volume_opacity->RemoveAllPoints();
-    state.volume_opacity->AddPoint(min_value, 0.00);
-    state.volume_opacity->AddPoint(mid_value, 0.035*opacity_scale);
-    state.volume_opacity->AddPoint(max_value, 0.18*opacity_scale);
+    for (int i=0; i<=256; ++i)
+    {
+        const double extinction = max_value * static_cast<double>(i) / 256.;
+        state.volume_opacity->AddPoint(extinction, -std::expm1(-extinction));
+    }
+    state.volume_property->SetScalarOpacityUnitDistance(1.);
     state.volume_property->Modified();
+}
+
+void update_volume_lighting(Viz_state& state)
+{
+    state.volume_mapper->SetVolumetricScatteringBlending(state.scattering_blending);
+    state.volume_mapper->SetGlobalIlluminationReach(state.shadow_reach);
+    state.volume_mapper->Modified();
 }
 
 void update_streamline_settings(Viz_state& state)
@@ -343,108 +340,16 @@ void update_streamline_settings(Viz_state& state)
     state.stream_tracer->Modified();
 }
 
-double uniform_spacing(const std::vector<float>& axis)
-{
-    if (axis.size() <= 1)
-        return 1.;
-    return static_cast<double>(axis.back() - axis.front()) / static_cast<double>(axis.size() - 1);
-}
-
-bool axis_is_uniform(const std::vector<float>& axis)
-{
-    if (axis.size() <= 2)
-        return true;
-
-    const double reference = uniform_spacing(axis);
-    const double tolerance = std::max(1.e-5, std::abs(reference) * 1.e-4);
-    for (std::size_t i=1; i<axis.size(); ++i)
-        if (std::abs(static_cast<double>(axis[i] - axis[i-1]) - reference) > tolerance)
-            return false;
-
-    return true;
-}
-
-vtkSmartPointer<vtkFloatArray> resample_scalars_to_uniform_image(
-        const Snapshot& snapshot,
-        vtkFloatArray* source_scalars)
-{
-    auto values = vtkSmartPointer<vtkFloatArray>::New();
-    values->SetName(source_scalars->GetName());
-    values->SetNumberOfComponents(1);
-    values->SetNumberOfTuples(static_cast<vtkIdType>(snapshot.scalars.size()));
-
-    std::vector<Axis_sample> x_samples;
-    std::vector<Axis_sample> y_samples;
-    std::vector<Axis_sample> z_samples;
-    x_samples.reserve(static_cast<std::size_t>(snapshot.nx));
-    y_samples.reserve(static_cast<std::size_t>(snapshot.ny));
-    z_samples.reserve(static_cast<std::size_t>(snapshot.nz));
-
-    for (int i=0; i<snapshot.nx; ++i)
-    {
-        const float x = snapshot.nx <= 1
-                ? (snapshot.x.empty() ? 0.f : snapshot.x.front())
-                : snapshot.x.front() + static_cast<float>(i) *
-                    (snapshot.x.back() - snapshot.x.front()) / static_cast<float>(snapshot.nx - 1);
-        x_samples.push_back(locate_axis_sample(snapshot.x, x));
-    }
-    for (int j=0; j<snapshot.ny; ++j)
-    {
-        const float y = snapshot.ny <= 1
-                ? (snapshot.y.empty() ? 0.f : snapshot.y.front())
-                : snapshot.y.front() + static_cast<float>(j) *
-                    (snapshot.y.back() - snapshot.y.front()) / static_cast<float>(snapshot.ny - 1);
-        y_samples.push_back(locate_axis_sample(snapshot.y, y));
-    }
-    for (int k=0; k<snapshot.nz; ++k)
-    {
-        const float z = snapshot.nz <= 1
-                ? (snapshot.z.empty() ? 0.f : snapshot.z.front())
-                : snapshot.z.front() + static_cast<float>(k) *
-                    (snapshot.z.back() - snapshot.z.front()) / static_cast<float>(snapshot.nz - 1);
-        z_samples.push_back(locate_axis_sample(snapshot.z, z));
-    }
-
-    for (int k=0; k<snapshot.nz; ++k)
-        for (int j=0; j<snapshot.ny; ++j)
-            for (int i=0; i<snapshot.nx; ++i)
-            {
-                const auto id = point_id(snapshot.nx, snapshot.ny, i, j, k);
-                values->SetValue(
-                        static_cast<vtkIdType>(id),
-                        sample_component(
-                            snapshot.scalars,
-                            snapshot.nx,
-                            snapshot.ny,
-                            x_samples[static_cast<std::size_t>(i)],
-                            y_samples[static_cast<std::size_t>(j)],
-                            z_samples[static_cast<std::size_t>(k)]));
-            }
-
-    return values;
-}
-
 void update_volume_image(Viz_state& state, const Snapshot& snapshot, vtkFloatArray* scalars)
 {
     state.volume_image->SetDimensions(snapshot.nx, snapshot.ny, snapshot.nz);
     state.volume_image->SetOrigin(
-            snapshot.x.empty() ? 0. : snapshot.x.front(),
-            snapshot.y.empty() ? 0. : snapshot.y.front(),
-            snapshot.z.empty() ? 0. : snapshot.z.front());
+            snapshot.domain_origin[0] + 0.5*snapshot.cell_size[0],
+            snapshot.domain_origin[1] + 0.5*snapshot.cell_size[1],
+            snapshot.domain_origin[2] + 0.5*snapshot.cell_size[2]);
     state.volume_image->SetSpacing(
-            uniform_spacing(snapshot.x),
-            uniform_spacing(snapshot.y),
-            uniform_spacing(snapshot.z));
-
-    state.volume_resampled = !axis_is_uniform(snapshot.x)
-            || !axis_is_uniform(snapshot.y)
-            || !axis_is_uniform(snapshot.z);
-
-    if (state.volume_resampled)
-        state.volume_image->GetPointData()->SetScalars(
-                resample_scalars_to_uniform_image(snapshot, scalars));
-    else
-        state.volume_image->GetPointData()->SetScalars(scalars);
+            snapshot.cell_size[0], snapshot.cell_size[1], snapshot.cell_size[2]);
+    state.volume_image->GetPointData()->SetScalars(scalars);
 
     state.volume_image->Modified();
 }
@@ -525,8 +430,10 @@ void update_dataset(Viz_state& state, const Dataset& dataset)
 
     const bool include_velocity = state.show_vectors;
     const auto snapshot = dataset.snapshot(
-            scalar_name, state.time_index, state.stride, include_velocity);
+            scalar_name, state.time_index, state.stride, include_velocity, state.output_grid);
     state.dims = {{snapshot.nx, snapshot.ny, snapshot.nz}};
+    state.domain_origin = snapshot.domain_origin;
+    state.domain_size = snapshot.domain_size;
     state.scalar_min = snapshot.scalar_min;
     state.scalar_max = snapshot.scalar_max;
     state.vector_min = snapshot.vector_min;
@@ -596,13 +503,6 @@ void update_dataset(Viz_state& state, const Dataset& dataset)
     update_velocity_polydata(state, snapshot);
     update_streamline_seeds(state, snapshot);
 
-    const float scalar_range_min = state.scalar_min == state.scalar_max
-        ? state.scalar_min - 1.f : state.scalar_min;
-    const float scalar_range_max = state.scalar_min == state.scalar_max
-        ? state.scalar_max + 1.f : state.scalar_max;
-    state.scalar_lut->SetTableRange(scalar_range_min, scalar_range_max);
-    state.scalar_lut->Build();
-
     const float vector_range_min = state.vector_min == state.vector_max
         ? state.vector_min - 1.f : state.vector_min;
     const float vector_range_max = state.vector_min == state.vector_max
@@ -621,7 +521,6 @@ void update_dataset(Viz_state& state, const Dataset& dataset)
             1.});
     state.vector_mapper->SetScaleFactor(state.glyph_scale * state.max_extent * 0.04);
     update_volume_transfer(state);
-    update_actor_scale(state);
     update_streamline_settings(state);
     update_visibility(state);
 
@@ -801,7 +700,7 @@ void create_pipeline(Viz_state& state)
     state.volume_property = vtkSmartPointer<vtkVolumeProperty>::New();
     state.volume_color = vtkSmartPointer<vtkColorTransferFunction>::New();
     state.volume_opacity = vtkSmartPointer<vtkPiecewiseFunction>::New();
-    state.scalar_lut = vtkSmartPointer<vtkLookupTable>::New();
+    state.sun_light = vtkSmartPointer<vtkLight>::New();
     state.vector_lut = vtkSmartPointer<vtkLookupTable>::New();
 
     state.make_current_callback = vtkSmartPointer<vtkCallbackCommand>::New();
@@ -833,11 +732,14 @@ void create_pipeline(Viz_state& state)
     state.render_window->SetSwapBuffers(true);
     state.render_window->AddRenderer(state.renderer);
     state.renderer->SetBackground(0.08, 0.09, 0.1);
-
-    state.scalar_lut->SetHueRange(0.58, 0.12);
-    state.scalar_lut->SetSaturationRange(0.10, 0.04);
-    state.scalar_lut->SetValueRange(0.12, 1.0);
-    state.scalar_lut->Build();
+    state.renderer->AutomaticLightCreationOff();
+    state.sun_light->SetLightTypeToSceneLight();
+    state.sun_light->SetPositional(false);
+    state.sun_light->SetPosition(-1., -1., 2.);
+    state.sun_light->SetFocalPoint(0., 0., 0.);
+    state.sun_light->SetColor(1., 0.98, 0.92);
+    state.sun_light->SetIntensity(1.2);
+    state.renderer->AddLight(state.sun_light);
 
     state.vector_lut->SetHueRange(0.32, 0.0);
     state.vector_lut->SetSaturationRange(0.8, 0.9);
@@ -876,10 +778,17 @@ void create_pipeline(Viz_state& state)
     state.stream_actor->GetProperty()->SetLineWidth(1.3);
 
     state.volume_mapper->SetInputData(state.volume_image);
+    state.volume_mapper->SetBlendModeToComposite();
+    state.volume_mapper->SetRequestedRenderModeToGPU();
+    state.volume_mapper->SetUseJittering(true);
     state.volume_property->SetColor(state.volume_color);
     state.volume_property->SetScalarOpacity(state.volume_opacity);
     state.volume_property->SetInterpolationTypeToLinear();
-    state.volume_property->ShadeOff();
+    state.volume_property->ShadeOn();
+    state.volume_property->SetAmbient(0.1);
+    state.volume_property->SetDiffuse(0.9);
+    state.volume_property->SetSpecular(0.0);
+    update_volume_lighting(state);
     state.volume_actor->SetMapper(state.volume_mapper);
     state.volume_actor->SetProperty(state.volume_property);
 
@@ -911,12 +820,6 @@ void render_gui(Viz_state& state, const Dataset& dataset)
                     state.case_settings.grid_size[0],
                     state.case_settings.grid_size[1],
                     state.case_settings.grid_size[2]);
-        if (state.case_settings.has_cell_size)
-            ImGui::Text(
-                    "cell %.6g x %.6g x %.6g m",
-                    state.case_settings.cell_size[0],
-                    state.case_settings.cell_size[1],
-                    state.case_settings.cell_size[2]);
     }
 
     if (ImGui::Button(state.playing ? "Pause" : "Play"))
@@ -940,7 +843,8 @@ void render_gui(Viz_state& state, const Dataset& dataset)
         state.needs_dataset_update = true;
     }
 
-    if (ImGui::SliderInt("Frame", &state.time_index, 0, state.max_time_index))
+    ImGui::SliderInt("Frame", &state.time_index, 0, state.max_time_index);
+    if (ImGui::IsItemDeactivatedAfterEdit())
         state.needs_dataset_update = true;
     ImGui::SliderFloat("Playback", &state.playback_rate, 1.f, 60.f, "%.0f fps");
 
@@ -978,43 +882,68 @@ void render_gui(Viz_state& state, const Dataset& dataset)
         state.needs_dataset_update = true;
     }
 
-    if (ImGui::SliderInt("Grid stride", &state.stride, 1, 16))
+    ImGui::SliderInt("Grid stride", &state.stride, 1, 16);
+    if (ImGui::IsItemDeactivatedAfterEdit())
     {
         state.needs_dataset_update = true;
         state.reset_camera = true;
     }
 
-    if (state.show_scalar
-            && ImGui::SliderFloat("Volume opacity", &state.volume_opacity_scale, 0.05f, 8.f))
-        update_volume_transfer(state);
-
-    bool scale_changed = false;
-    scale_changed |= ImGui::SliderFloat("X scale", &state.display_scale[0], 0.01f, 50.f, "%.2f");
-    scale_changed |= ImGui::SliderFloat("Y scale", &state.display_scale[1], 0.01f, 50.f, "%.2f");
-    scale_changed |= ImGui::SliderFloat("Z scale", &state.display_scale[2], 0.01f, 50.f, "%.2f");
-    if ((state.case_settings.has_cell_size || state.case_settings.has_domain_size)
-            && ImGui::Button("Auto scale"))
+    bool grid_edit_finished = false;
+    ImGui::InputFloat("Output top (m)", &state.output_top_input, 10.f, 100.f, "%.6g");
+    grid_edit_finished |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::InputInt("Vertical cells", &state.vertical_cells_input);
+    grid_edit_finished |= ImGui::IsItemDeactivatedAfterEdit();
+    if (grid_edit_finished)
     {
-        state.display_scale = state.case_settings.display_scale;
-        scale_changed = true;
-    }
-    if (scale_changed)
-    {
-        update_actor_scale(state);
+        state.output_top_input = std::max(1.e-6f, state.output_top_input);
+        state.vertical_cells_input = std::max(1, state.vertical_cells_input);
+        state.output_grid.top = state.output_top_input;
+        state.output_grid.vertical_cells = state.vertical_cells_input;
+        state.needs_dataset_update = true;
         state.reset_camera = true;
     }
 
-    if (glyph_method && ImGui::SliderInt("Vector stride", &state.vector_stride, 1, 64))
-        state.needs_dataset_update = true;
+    bool lighting_edit_finished = false;
+    ImGui::SliderFloat(
+            "Volume scattering", &state.scattering_blending, 0.f, 2.f, "%.2f");
+    lighting_edit_finished |= ImGui::IsItemDeactivatedAfterEdit();
+    ImGui::SliderFloat(
+            "Shadow reach", &state.shadow_reach, 0.f, 1.f, "%.2f");
+    lighting_edit_finished |= ImGui::IsItemDeactivatedAfterEdit();
+    if (lighting_edit_finished)
+        update_volume_lighting(state);
 
-    if (glyph_method && ImGui::SliderFloat("Vector scale", &state.glyph_scale, 0.05f, 100.f))
-        state.vector_mapper->SetScaleFactor(state.glyph_scale * state.max_extent * 0.04);
+    ImGui::Text(
+            "origin (%.6g, %.6g, %.6g) m",
+            state.domain_origin[0], state.domain_origin[1], state.domain_origin[2]);
+    ImGui::Text(
+            "size (%.6g, %.6g, %.6g) m",
+            state.domain_size[0], state.domain_size[1], state.domain_size[2]);
 
-    if (streamline_method && ImGui::SliderInt("Seed stride", &state.streamline_stride, 1, 64))
-        state.needs_dataset_update = true;
+    if (glyph_method)
+    {
+        ImGui::SliderInt("Vector stride", &state.vector_stride, 1, 64);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            state.needs_dataset_update = true;
+    }
+
+    if (glyph_method)
+    {
+        ImGui::SliderFloat("Vector scale", &state.glyph_scale, 0.05f, 100.f);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            state.vector_mapper->SetScaleFactor(state.glyph_scale * state.max_extent * 0.04);
+    }
+
+    if (streamline_method)
+    {
+        ImGui::SliderInt("Seed stride", &state.streamline_stride, 1, 64);
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            state.needs_dataset_update = true;
+    }
 
     if (state.show_scalar)
-        ImGui::Text("scalar %.6g .. %.6g", state.scalar_min, state.scalar_max);
+        ImGui::Text("extinction %.6g .. %.6g m^-1", state.scalar_min, state.scalar_max);
 
     if (state.show_vectors)
         ImGui::Text("speed %.6g .. %.6g", state.vector_min, state.vector_max);
@@ -1034,7 +963,8 @@ void render_gui(Viz_state& state, const Dataset& dataset)
     {
         try
         {
-            const auto summary = dataset.export_cloud_velocity_vdb_sequence(state.export_directory);
+            const auto summary = dataset.export_cloud_velocity_vdb_sequence(
+                    state.export_directory, state.output_grid);
             std::ostringstream message;
             message << "exported " << summary.frames << " frames of ql, qi, and masked u/v/w";
             if (summary.resampled)
@@ -1061,6 +991,7 @@ void render_gui(Viz_state& state, const Dataset& dataset)
             ImGui::TextWrapped("%s", state.export_message.c_str());
     }
 
+    state.gui_input_active = ImGui::IsAnyItemActive();
     ImGui::End();
 }
 }
@@ -1068,7 +999,8 @@ void render_gui(Viz_state& state, const Dataset& dataset)
 void run_visualizer(
         const Dataset& dataset,
         const Case_settings& case_settings,
-        const fs::path& source_directory)
+        const fs::path& source_directory,
+        const Output_grid& output_grid)
 {
     Viz_state state;
     state.scalar_names = dataset.scalar_names();
@@ -1076,9 +1008,10 @@ void run_visualizer(
             it != state.scalar_names.end())
         state.scalar_index = static_cast<int>(std::distance(state.scalar_names.begin(), it));
     state.case_settings = case_settings;
+    state.output_grid = output_grid;
+    state.output_top_input = static_cast<float>(output_grid.top);
+    state.vertical_cells_input = output_grid.vertical_cells;
     state.export_directory = (source_directory.empty() ? fs::current_path() : source_directory) / "vdb";
-    if (state.case_settings.has_domain_size)
-        state.display_scale = state.case_settings.display_scale;
 
     if (!glfwInit())
         throw std::runtime_error("Failed to initialize GLFW");
@@ -1129,7 +1062,7 @@ void run_visualizer(
         else
             state.last_step = std::chrono::steady_clock::now();
 
-        if (state.needs_dataset_update)
+        if (state.needs_dataset_update && !state.gui_input_active)
             update_dataset(state, dataset);
 
         int width = 0;

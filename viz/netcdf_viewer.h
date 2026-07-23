@@ -29,5 +29,6 @@ namespace microhh::viz
     void run_visualizer(
             const Dataset& dataset,
             const Case_settings& case_settings,
-            const fs::path& source_directory);
+            const fs::path& source_directory,
+            const Output_grid& output_grid);
 }
